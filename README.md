@@ -121,12 +121,16 @@ retry / "Open settings" are all meant to work since the review-fix pass — plea
 
 ## Project status
 
-As of 2026-09-18: the committed baseline passes `assembleDebug` and `assembleRelease` and runs
-on the emulator with the photo grid loading and rendering thumbnails. A code-review fix pass
-(HANDOFF.md §7) has since been applied on top and has **not been compiled or run yet** —
-rebuild before trusting it. The viewer, filmstrip sync and video frame capture have **not**
-been exercised on-device, it has not been run on a physical device, and there are no
-automated tests.
+As of 2026-09-18 (`0b575a3`): `assembleDebug` and `assembleRelease` both pass with zero compile
+warnings, and the app has been smoke-tested on a `Pixel_9_Pro_XL` / API 37 emulator with no
+crashes. Confirmed working: the grid with live MediaStore refresh, pager swiping, filmstrip
+1:1 sync, viewer overlays, back handling, all three permission paths (including partial
+"Select photos" access), video playback, and video frame capture end to end.
+
+Not yet covered: any **physical device**, `ACTION_VIEW` ("Open with OneGallery"), grid
+pinch-to-zoom and zoom/pan clamping, and the subjective feel of fast filmstrip scrubbing —
+automated gestures don't reproduce real multitouch. There are still no automated tests.
+`HANDOFF.md` §1 has the full matrix of what was and wasn't exercised.
 
 Known issues are documented with file/line references in **[HANDOFF.md](HANDOFF.md)** — read
 that before contributing. It also carries the architecture map, the suggested work queue, and

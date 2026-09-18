@@ -1,9 +1,9 @@
 # OneGallery — Engineering Handoff
 
-**Last verified:** 2026-09-18
-**Status:** The committed baseline (`fbcc4f4`) builds clean and runs on the emulator (grid
-verified). The 2026-09-18 review-fix pass (§7) sits on top of it and has **not been compiled or
-run yet**. Not yet run on a physical device.
+**Last verified:** 2026-09-18 at `0b575a3` (PR #1 merged)
+**Status:** Builds clean and runs on the emulator. The review-fix pass has been compiled and
+smoke-tested — see §1 for exactly what was and was not exercised. Not yet run on a physical
+device.
 **Owner:** Victor Ortega
 
 This document is the single source of truth for anyone — human or AI agent — picking up
@@ -14,14 +14,29 @@ by actually running it on the owner's machine, not inferred from reading code.
 
 ## 1. Current state
 
+All of the following was checked on `Pixel_9_Pro_XL` / API 37 at commit `0b575a3`.
+**Zero crashes** across the whole session.
+
 | Item | Status |
 | --- | --- |
-| `gradlew assembleDebug` | **NEEDS RE-VERIFY** — VERIFIED PASSING on the baseline (~21 MB `app-debug.apk`); the review-fix pass (§7) was written on a machine with no JDK / Android SDK and has not been compiled |
-| `gradlew assembleRelease` | **NEEDS RE-VERIFY** (same reason; passed on the baseline) |
-| Compile warnings | Unknown until rebuilt (baseline had 1, the deprecated icon, since fixed) |
-| Run on emulator | **VERIFIED on the baseline only** — grid loads and renders thumbnails on `Pixel_9_Pro_XL` / API 37. Not re-run since the review-fix pass |
+| `gradlew assembleDebug` | **VERIFIED PASSING** — ~21 MB `app-debug.apk` |
+| `gradlew assembleRelease` | **VERIFIED PASSING** — 4 MB minified (R8 + `proguard-rules.pro` work) |
+| Compile warnings | **Zero** |
+| Grid + live refresh | **VERIFIED** — thumbnails render; `ContentObserver` picked up new media 7 → 8 → 9 items with no restart |
+| Pager swiping | **VERIFIED** — advances; the old gesture-starvation bug is gone |
+| Filmstrip 1:1 sync | **VERIFIED** — active thumbnail spans x582–762, centre 672 on a 1344 px screen (dead centre) |
+| Overlay / video-control collision | **VERIFIED** — Capture at y417–477 vs top bar ending y315; seek bar y2260–2392 vs filmstrip starting y2452 |
+| Back handling | **VERIFIED** — returns to the grid instead of exiting |
+| Permissions: "Allow all" | **VERIFIED** |
+| Permissions: deny | **VERIFIED** — "Allow access" + "Open settings" shown; no dead-end |
+| Permissions: partial access | **VERIFIED** — with `READ_MEDIA_VISUAL_USER_SELECTED` granted and `READ_MEDIA_IMAGES` denied, the app rendered exactly the 2 selected items |
+| Video playback + background pause | **VERIFIED** — plays; no active audio player after leaving the viewer |
+| Video frame capture | **VERIFIED** — 1280×720 native-resolution frame at the correct playback position, valid EXIF APP1 with `Captured from…` UserComment, saved to `Pictures/OneGallery_Captures/` and sorted next to its source video |
+| `ACTION_VIEW` handling | **NOT EXERCISED** (§6.14) |
+| Grid pinch-to-zoom, zoom/pan clamping | **NOT EXERCISED** — automated gestures don't reproduce real multitouch |
+| Filmstrip scrubbing *feel* | **NOT ASSESSED** — subjective, needs a human thumb |
+| `minSdk` 26 → 29 | **NOT TESTABLE HERE** — accepted as a product decision; drops Android 8/9 |
 | Run on physical Pixel | **NOT YET DONE** |
-| Viewer / filmstrip / video capture | **NOT YET EXERCISED** — only the grid has been confirmed |
 | Automated tests | **NONE EXIST** |
 
 The project previously did **not** compile. One Kotlin error and two missing build files
@@ -209,8 +224,8 @@ Manual smoke test, in order:
 Ranked by how much they will affect a first test run. Section numbers are kept stable so old
 references still resolve; issues fixed in the 2026-09-18 review-fix pass are listed at the end.
 
-> **Everything marked "fixed" below is UNVERIFIED** — written without a compiler or device.
-> Treat each as "should be fixed, confirm on the AVD" (§5 checklist).
+> The fixes from the 2026-09-18 pass have since been **built and smoke-tested** on the AVD —
+> §1 records exactly which were confirmed and which were not reachable by automated testing.
 
 ### 6.3 The "instant TextureView" capture path never fires — HIGH (feature degraded)
 
@@ -281,10 +296,25 @@ sparse for those. The viewer shows that one item only — no filmstrip neighbour
 
 ## 7. Changelog
 
-### 2026-09-18 — code-review fix pass (**NOT COMPILED, NOT RUN**)
+### 2026-09-18 — PR #1 built, smoke-tested and merged (`0b575a3`)
 
-Written on a machine with no JDK / Android SDK. First job for whoever picks this up: run
-`gradlew.bat assembleDebug`, fix any compile errors, then walk the §5 checklist.
+The review-fix pass below was compiled and exercised on `Pixel_9_Pro_XL` / API 37, then merged.
+**It needed no code changes to build** — `assembleDebug` and `assembleRelease` both passed
+first time, with zero compile warnings.
+
+Verified: pager swiping, filmstrip 1:1 sync and centring, overlay/video-control collision,
+back handling, live MediaStore refresh, no background-audio leak, both previously-broken
+permission paths, and video frame capture end to end. Zero crashes. See §1 for the full matrix
+of what was and was not exercised.
+
+Testing technique worth reusing: `uiautomator dump` beats screenshots for verifying layout
+fixes here, because the video controls auto-hide after 3 s and screenshots race the fade. The
+dump gives exact pixel bounds, which turns "do these two overlap?" into arithmetic.
+
+### 2026-09-18 — code-review fix pass (written blind, since verified)
+
+Written on a machine with no JDK / Android SDK, hence the original "NOT COMPILED" warning. It
+was subsequently built and smoke-tested — see the entry above.
 
 Bugs found in review (none were in the previous known-issues list unless noted):
 
@@ -367,13 +397,12 @@ Still unexercised on-device: the viewer, filmstrip sync, and video frame capture
 
 Roughly dependency-ordered. Good first tasks are marked ★.
 
-1. ★ **Compile the review-fix pass** (`gradlew.bat assembleDebug` + `assembleRelease`) and fix
-   whatever the compiler finds. Then restore the VERIFIED markers in §1.
-2. ★ Re-run on the `Pixel_9_Pro_XL` AVD and finish the on-device smoke test. Before the
-   review-fix pass only the grid was confirmed; the viewer, filmstrip sync and video frame
-   capture have never been exercised. Load a photo set and a video (`/sdcard/Movies/`) per §5
-   and walk the checklist — especially pager swiping, filmstrip sync feel, and the three
-   permission paths.
+1. ★ **Run it on a physical Pixel.** Everything so far is emulator-only. The video path is
+   what the emulator tests worst — its software decode behaves nothing like real hardware, so
+   capture latency and playback smoothness are still unknown on real silicon.
+2. ★ **Cover the gaps automation couldn't reach** (see §1): `ACTION_VIEW` ("Open with
+   OneGallery" from another app), grid pinch-to-zoom, zoom/pan clamping at the image edges,
+   and how the filmstrip actually *feels* during a fast scrub. These need a human thumb.
 3. Restore the real TextureView capture path (§6.3).
 4. Move `MediaStoreRepository` creation out of `VideoPlayerView` (it builds its own; pass the
    ViewModel's instance or a snapshot callback down instead).
