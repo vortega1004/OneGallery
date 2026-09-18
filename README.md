@@ -90,18 +90,28 @@ gradlew.bat assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-### Testing notes
+### Loading test media onto an emulator
 
 A fresh emulator has an **empty** gallery, so the app will correctly show "0 items" until you
-add media:
+add media. Two traps here, both verified the hard way — see [HANDOFF.md](HANDOFF.md) §5.
+
+**Do not drag and drop files onto the emulator window.** That lands them in `/sdcard/Download/`,
+and under scoped storage an app holding only `READ_MEDIA_IMAGES` / `READ_MEDIA_VIDEO` cannot see
+files in `Download/`. MediaProvider filters them out silently — you get an empty cursor with no
+error, which looks exactly like a broken app. Push into a real media directory instead:
 
 ```bash
-adb push C:\Users\V\Pictures\sample.jpg /sdcard/Pictures/
+adb push "C:\Users\V\Pictures\sample.jpg" /sdcard/Pictures/
 ```
 
+Then trigger a scan. The old `MEDIA_SCANNER_SCAN_FILE` broadcast is deprecated since API 29 and
+silently does nothing on modern images — use this instead:
+
 ```bash
-adb shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file:///sdcard/Pictures
+adb shell content call --uri content://media --method scan_file --arg /sdcard/Pictures/sample.jpg
 ```
+
+Put videos in `/sdcard/Movies/` and scan them the same way.
 
 When the permission dialog appears, tap **"Allow all"** — the "Select photos…" partial-access
 path currently dead-ends the app (see [HANDOFF.md](HANDOFF.md) §6.1).
@@ -110,8 +120,10 @@ path currently dead-ends the app (see [HANDOFF.md](HANDOFF.md) §6.1).
 
 ## Project status
 
-`assembleDebug` and `assembleRelease` both pass as of 2026-09-18. The app has **not** yet been
-run on a physical device, and there are no automated tests.
+As of 2026-09-18: `assembleDebug` and `assembleRelease` both pass, and the app runs on the
+emulator with the photo grid loading and rendering thumbnails. The viewer, filmstrip sync and
+video frame capture have **not** been exercised on-device yet, it has not been run on a
+physical device, and there are no automated tests.
 
 Known issues are documented with file/line references in **[HANDOFF.md](HANDOFF.md)** — read
 that before contributing. It also carries the architecture map, the suggested work queue, and

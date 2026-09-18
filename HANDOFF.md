@@ -1,7 +1,7 @@
 # OneGallery — Engineering Handoff
 
 **Last verified:** 2026-09-18
-**Status:** Builds clean. Not yet run on a physical device.
+**Status:** Builds clean and runs on the emulator. Not yet run on a physical device.
 **Owner:** Victor Ortega
 
 This document is the single source of truth for anyone — human or AI agent — picking up
@@ -17,8 +17,9 @@ by actually running it on the owner's machine, not inferred from reading code.
 | `gradlew assembleDebug` | **VERIFIED PASSING** — produces a ~21 MB `app-debug.apk` |
 | `gradlew assembleRelease` | **VERIFIED PASSING** |
 | Compile warnings | 1 (a deprecated icon, see §6.10) |
-| Run on emulator | **NOT YET DONE** |
+| Run on emulator | **VERIFIED** — grid loads and renders thumbnails on `Pixel_9_Pro_XL` / API 37 |
 | Run on physical Pixel | **NOT YET DONE** |
+| Viewer / filmstrip / video capture | **NOT YET EXERCISED** — only the grid has been confirmed |
 | Automated tests | **NONE EXIST** |
 
 The project previously did **not** compile. One Kotlin error and two missing build files
@@ -119,15 +120,47 @@ the entire media library is queried into memory on every change.
 
 ## 5. Testing checklist
 
-The emulator starts with an **empty** gallery, so the app will correctly show "0 items" and
-look broken until you add media:
+### Loading test media — read this before reporting "the grid is empty"
+
+The emulator starts with an **empty** gallery, so the app correctly shows "0 items" until you
+add media. Two traps cost an hour of debugging on 2026-09-18; both are now verified.
+
+**Trap 1 — never drag and drop onto the emulator window.** Drag-and-drop lands files in
+`/sdcard/Download/`. Under scoped storage, an app holding only `READ_MEDIA_IMAGES` /
+`READ_MEDIA_VIDEO` **cannot see files in `Download/`** — access there requires SAF or
+ownership. MediaProvider enforces this by *filtering result rows*, not by throwing, so the app
+receives a valid empty cursor with no `SecurityException` and no log entry. It is
+indistinguishable from "no media exists."
+
+Measured, with the same six files and identical app code:
+
+| Files in | App's cursor | `adb shell content query` |
+| --- | --- | --- |
+| `Download/` | **0 rows** | 6 rows |
+| `Pictures/` | **7 rows** | 7 rows |
+
+`adb shell` runs with shell privileges and is *not* subject to the app's scope — so shell
+seeing media proves nothing about what the app can see. When a MediaStore query looks wrong,
+compare the app's row count against shell on the same URI: divergence means access scope,
+agreement means a real query bug.
+
+**Trap 2 — the `MEDIA_SCANNER_SCAN_FILE` broadcast is dead.** Deprecated since API 29, it
+silently no-ops on modern system images. Use the MediaProvider `scan_file` method.
+
+Correct procedure (verified on the `Pixel_9_Pro_XL` / API 37 AVD):
 
 ```bash
-adb push C:\Users\V\Pictures\sample.jpg /sdcard/Pictures/
+adb push "C:\path\to\photo.jpg" /sdcard/Pictures/
 ```
 
 ```bash
-adb shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file:///sdcard/Pictures
+adb shell content call --uri content://media --method scan_file --arg /sdcard/Pictures/photo.jpg
+```
+
+Videos go in `/sdcard/Movies/`, scanned the same way. Verify indexing with:
+
+```bash
+adb shell content query --uri content://media/external/images/media --projection _display_name:relative_path
 ```
 
 When the permission dialog appears, **tap "Allow all"** — "Select photos…" currently
@@ -257,6 +290,33 @@ as a reference or delete it, but don't "fix" it thinking it's live.
 
 ## 7. Changelog
 
+### 2026-09-18 — first successful run on an emulator
+
+Launched on the `Pixel_9_Pro_XL` / API 37 AVD. The grid loads and renders thumbnails
+correctly (7 test images). **No application code was changed** — the committed code was
+already correct.
+
+The "empty gallery" symptom that prompted this investigation was caused entirely by the
+*testing instructions* in this document, which have been rewritten (§5):
+
+- Media loaded by drag-and-drop goes to `/sdcard/Download/`, which the app cannot read under
+  scoped storage. Moving the same files to `/sdcard/Pictures/` made all of them appear, with
+  the app code untouched.
+- The `MEDIA_SCANNER_SCAN_FILE` broadcast previously recommended here is deprecated and
+  no-ops on modern images.
+
+Two hypotheses were investigated and **disproved** — recorded so nobody re-treads them:
+
+- *"`date_taken` is an invalid projection column on the Files collection."* False. The column
+  constant is `datetaken`, not `date_taken`; the app's full projection queries fine.
+- *"`MediaStore.Files` returns an empty cursor on Android 13+ for apps without
+  `READ_EXTERNAL_STORAGE`, so the typed Images/Video collections must be used."* False. The
+  existing `MediaStore.Files` query returned all 7 items once the files were in a readable
+  directory. A refactor to typed collections was written, tested, found unnecessary, and
+  reverted.
+
+Still unexercised on-device: the viewer, filmstrip sync, and video frame capture.
+
 ### 2026-09-18 — made the project buildable
 
 1. **Fixed compile error** at `VideoPlayerView.kt:313`. Was
@@ -278,7 +338,9 @@ as a reference or delete it, but don't "fix" it thinking it's live.
 
 Roughly dependency-ordered. Good first tasks are marked ★.
 
-1. ★ Run it on the `Pixel_9_Pro_XL` AVD and record what actually happens (§5).
+1. ★ Finish the on-device smoke test. The grid is confirmed working; the viewer, filmstrip
+   sync and video frame capture are still unexercised. Load a video into `/sdcard/Movies/`
+   per §5 and work through the checklist below.
 2. ★ Fix the permission dead-end (§6.1) — highest user-facing risk.
 3. Move the `ContentObserver` query off the main thread (§6.2).
 4. Restore the real TextureView capture path (§6.3).
