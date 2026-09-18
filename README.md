@@ -121,16 +121,24 @@ retry / "Open settings" are all meant to work since the review-fix pass — plea
 
 ## Project status
 
-As of 2026-09-18 (`0b575a3`): `assembleDebug` and `assembleRelease` both pass with zero compile
-warnings, and the app has been smoke-tested on a `Pixel_9_Pro_XL` / API 37 emulator with no
-crashes. Confirmed working: the grid with live MediaStore refresh, pager swiping, filmstrip
-1:1 sync, viewer overlays, back handling, all three permission paths (including partial
-"Select photos" access), video playback, and video frame capture end to end.
+As of 2026-09-18 (`b2e524d`): `assembleDebug` and `assembleRelease` both pass with zero compile
+warnings. Smoke-tested with no crashes on an emulator and on a **physical Pixel 10 Pro XL**
+against a real 3,132-item library.
 
-Not yet covered: any **physical device**, `ACTION_VIEW` ("Open with OneGallery"), grid
-pinch-to-zoom and zoom/pan clamping, and the subjective feel of fast filmstrip scrubbing —
-automated gestures don't reproduce real multitouch. There are still no automated tests.
-`HANDOFF.md` §1 has the full matrix of what was and wasn't exercised.
+Confirmed working: the grid with live MediaStore refresh, the Albums tab (folder browsing with
+the viewer scoped to the folder you opened from), pager swiping, filmstrip 1:1 sync, viewer
+overlays, back handling, all three permission paths including partial "Select photos" access,
+video playback, and video frame capture end to end — the last of which is confirmed on real
+hardware.
+
+Two performance problems appear only at real scale, both open: the filmstrip stutters while
+scrubbing, and the grid is slow to first paint. The library is still loaded in full with no
+pagination, and thumbnails decode at full resolution — see `HANDOFF.md` §6.15 and §6.16.
+
+Not yet covered: `ACTION_VIEW` ("Open with OneGallery"), grid pinch-to-zoom and zoom/pan
+clamping, and the Albums tab on physical hardware. Search is unimplemented and says so. There
+are still no automated tests. `HANDOFF.md` §1 has the full matrix of what was and wasn't
+exercised, and on which device.
 
 Known issues are documented with file/line references in **[HANDOFF.md](HANDOFF.md)** — read
 that before contributing. It also carries the architecture map, the suggested work queue, and

@@ -1,9 +1,10 @@
 # OneGallery — Engineering Handoff
 
-**Last verified:** 2026-09-18 at `0b575a3` (PR #1 merged)
-**Status:** Builds clean and runs on the emulator. The review-fix pass has been compiled and
-smoke-tested — see §1 for exactly what was and was not exercised. Not yet run on a physical
-device.
+**Last verified:** 2026-09-18 at `b2e524d`
+**Status:** Builds clean. Smoke-tested on the emulator and on a physical Pixel 10 Pro XL
+against a real 3,132-item library. Video frame capture works on real hardware. Two
+performance problems appear only at that scale (§6.15, §6.16). See §1 for exactly what was
+and was not exercised.
 **Owner:** Victor Ortega
 
 This document is the single source of truth for anyone — human or AI agent — picking up
@@ -14,8 +15,10 @@ by actually running it on the owner's machine, not inferred from reading code.
 
 ## 1. Current state
 
-All of the following was checked on `Pixel_9_Pro_XL` / API 37 at commit `0b575a3`.
-**Zero crashes** across the whole session.
+Rows say which device they were checked on. Emulator rows are the `Pixel_9_Pro_XL` / API 37
+AVD with a 9-item library; the physical row is a Pixel 10 Pro XL with 3,132 items. **Zero
+crashes** on either. Anything the emulator's tiny library cannot exercise is called out —
+§6.15 and §6.16 are exactly the problems that only appeared at real scale.
 
 | Item | Status |
 | --- | --- |
@@ -36,7 +39,8 @@ All of the following was checked on `Pixel_9_Pro_XL` / API 37 at commit `0b575a3
 | Grid pinch-to-zoom, zoom/pan clamping | **NOT EXERCISED** — automated gestures don't reproduce real multitouch |
 | Filmstrip scrubbing *feel* | **NOT ASSESSED** — subjective, needs a human thumb |
 | `minSdk` 26 → 29 | **NOT TESTABLE HERE** — accepted as a product decision; drops Android 8/9 |
-| Run on physical Pixel | **NOT YET DONE** |
+| Run on physical Pixel | **VERIFIED** — Pixel 10 Pro XL, Android 17 / API 37, 3,132 items (2,451 photos + 681 videos). Video frame capture confirmed working on real hardware. Two performance problems surfaced only at this scale: §6.15, §6.16 |
+| Albums tab | **VERIFIED on emulator** — folder grid, drill-down, viewer scoped to the album, full back chain. Not yet re-tested on the Pixel |
 | Automated tests | **NONE EXIST** |
 
 The project previously did **not** compile. One Kotlin error and two missing build files
@@ -102,14 +106,19 @@ exists; everything else is scaffolding around them.
 Single-module app, MVI-ish, no DI framework. `GalleryViewModel` owns the media list; the rest
 of the UI state lives in composables and is passed down.
 
+> **Grid browsing state is hoisted into `GalleryApp` on purpose** — selected tab, opened
+> album, column count. The viewer *replaces* the grid in the composition rather than stacking
+> on top of it, so `rememberSaveable` state owned by `GalleryGridScreen` is discarded the
+> moment a photo is opened. Add new grid-level state in `GalleryApp`, not in the grid.
+
 ```
 app/src/main/java/com/onegallery/app/
 ├── MainActivity.kt              # Permission gate, ACTION_VIEW handling, grid/viewer switch
 ├── GalleryViewModel.kt          # StateFlow of the media list (single MediaStore subscription)
 ├── data/MediaStoreRepository.kt # ContentResolver queries, ContentObserver, snapshot saver
-├── domain/MediaItem.kt          # MediaItem, MediaType, Album, DateGroupedMedia
+├── domain/MediaItem.kt          # Models + toAlbums() (pure bucket grouping)
 └── ui/
-    ├── grid/GalleryGridScreen.kt             # Pinch-zoom grid, bottom nav
+    ├── grid/GalleryGridScreen.kt             # Pinch-zoom grid, Albums folders, bottom nav
     ├── viewer/MediaViewerScreen.kt           # HorizontalPager + zoomable image + overlays
     ├── viewer/MediaDetailsSheet.kt           # ModalBottomSheet with EXIF-ish details
     ├── filmstrip/FilmStripInfinityViewer.kt  # Compose filmstrip, 1:1 synced with the pager
@@ -245,13 +254,32 @@ frame.
 *Fix:* inflate `PlayerView` from a layout XML with `app:surface_type="texture_view"`, or drop
 `PlayerView` and attach your own `TextureView` via `player.setVideoTextureView(...)`.
 
-### 6.4 Tabs and action buttons are non-functional — MEDIUM
+### 6.4 Action buttons are non-functional — MEDIUM (tabs fixed)
 
-`GalleryGridScreen.kt` (bottom nav), `MediaViewerScreen.kt` (action bar)
+`MediaViewerScreen.kt` (action bar)
 
-Albums and Search update `selectedTab` but the content never changes — the grid always
-renders Pictures. Share, Edit, Favorite, Delete and More are empty lambdas. `isFavorite` is
-hardcoded `false` and never read from `MediaStore.IS_FAVORITE`.
+Share, Edit, Favorite, Delete and More are empty lambdas. `isFavorite` is hardcoded `false`
+and never read from `MediaStore.IS_FAVORITE`.
+
+**Albums is now implemented** (folder grid → folder contents → viewer scoped to that folder).
+**Search is still unimplemented** but now says so on screen instead of silently rendering the
+Pictures grid.
+
+### 6.15 Filmstrip scrubbing stutters on a real library — MEDIUM
+
+Reported from the Pixel 10 Pro XL (3,132 items), and still present after the PR #1 sync
+rewrite. Not reproducible on the emulator's 9-item library, so it is a volume problem, not a
+logic one. Likely suspects, in order: every visible thumbnail recomposes as the mirrored
+scroll position changes; Coil decodes full-size images for 44×60 dp thumbnails instead of
+using `MediaStore`'s own thumbnails (`contentResolver.loadThumbnail`); and `scrollToItem` runs
+per frame during pager drags.
+
+### 6.16 Grid is slow to first paint at scale — MEDIUM
+
+Also from the Pixel: "doesn't populate that fast, but it's not unbearable." The repository
+loads the **entire** library into memory in one query with no pagination
+(`MediaStoreRepository.queryMediaItems`), and every visible cell then decodes a full-resolution
+image. Same thumbnail fix applies; pagination is the larger structural answer.
 
 ### 6.5 Every video page still builds its own ExoPlayer — LOW (was MEDIUM)
 
@@ -295,6 +323,27 @@ sparse for those. The viewer shows that one item only — no filmstrip neighbour
 ---
 
 ## 7. Changelog
+
+### 2026-09-18 — first physical-device run, and a working Albums tab
+
+Run on a **Pixel 10 Pro XL** (Android 17 / API 37) against a real 3,132-item library.
+**Video frame capture works on real hardware** — the biggest open unknown, now closed.
+
+Owner-reported findings, all recorded above: the filmstrip still stutters (§6.15) and the grid
+is slow to first paint (§6.16) — neither reproduces on the emulator's 9-item library, so both
+are volume problems. The Pictures/Albums tabs did nothing: the nav selection changed but the
+flat Pictures grid always rendered.
+
+Albums implemented in response (`b2e524d`): folder grid derived from MediaStore buckets via
+the new pure `List<MediaItem>.toAlbums()`, drill-down into a folder, and a viewer scoped to
+the folder you opened from. Derived from the in-memory list rather than re-querying — on a
+3k-item device a second full scan is the most expensive thing the UI could do.
+
+That change also fixed a **state-ownership bug** worth remembering: the viewer *replaces* the
+grid in the composition rather than stacking on it, so `rememberSaveable` state owned by
+`GalleryGridScreen` was thrown away every time a photo was opened. Back from the viewer landed
+on the flat Pictures grid instead of the album, and a second back left the app. Grid browsing
+state now lives in `GalleryApp`. **If you add more grid-level state, hoist it there too.**
 
 ### 2026-09-18 — PR #1 built, smoke-tested and merged (`0b575a3`)
 
@@ -397,23 +446,28 @@ Still unexercised on-device: the viewer, filmstrip sync, and video frame capture
 
 Roughly dependency-ordered. Good first tasks are marked ★.
 
-1. ★ **Run it on a physical Pixel.** Everything so far is emulator-only. The video path is
-   what the emulator tests worst — its software decode behaves nothing like real hardware, so
-   capture latency and playback smoothness are still unknown on real silicon.
-2. ★ **Cover the gaps automation couldn't reach** (see §1): `ACTION_VIEW` ("Open with
-   OneGallery" from another app), grid pinch-to-zoom, zoom/pan clamping at the image edges,
-   and how the filmstrip actually *feels* during a fast scrub. These need a human thumb.
-3. Restore the real TextureView capture path (§6.3).
-4. Move `MediaStoreRepository` creation out of `VideoPlayerView` (it builds its own; pass the
+1. ★ **Thumbnail decoding** — the single highest-value fix, and the likely root of *both*
+   §6.15 and §6.16. Grid and filmstrip cells feed Coil the full-resolution image URI, so a
+   12 MP JPEG is decoded to fill a 44×60 dp thumbnail. Use `contentResolver.loadThumbnail`
+   (API 29+, which `minSdk` now guarantees) or an explicit Coil `size()`. Measure on the
+   3k-item Pixel, not the emulator — neither problem reproduces at 9 items.
+2. ★ **Paginate the library load** (§6.16). `queryMediaItems` pulls all 3,132 rows into memory
+   on every change. Paging or a windowed query is the structural answer.
+3. **Cover the gaps automation couldn't reach** (see §1): `ACTION_VIEW`, grid pinch-to-zoom,
+   zoom/pan clamping at image edges, and Albums on the Pixel. These need a human thumb.
+4. Restore the real TextureView capture path (§6.3).
+5. Move `MediaStoreRepository` creation out of `VideoPlayerView` (it builds its own; pass the
    ViewModel's instance or a snapshot callback down instead).
-5. Implement Share and Delete via `MediaStore` + `IntentSender` (§6.4).
-6. Wire the Albums tab to the already-written `queryAlbums()`, and date headers to
-   `queryGroupedByDate()` — both exist in the repository but nothing calls them.
-7. Add a shared ExoPlayer across pager pages (§6.5).
-8. Light theme pass (§6.9).
-9. First tests: `MediaItem.formattedDuration`, `formatFileSize`, the date sort and the
-   date-grouping logic are pure functions and trivially unit-testable. There is currently no
-   test source set.
+6. Implement Share and Delete via `MediaStore` + `IntentSender` (§6.4).
+7. Wire sticky date headers to `queryGroupedByDate()` — it exists in the repository but
+   nothing calls it. (The Albums tab is now done; it derives from `toAlbums()` rather than
+   `queryAlbums()`, to avoid a second full-library query.)
+8. Add a shared ExoPlayer across pager pages (§6.5).
+9. Light theme pass (§6.9).
+10. First tests: `MediaItem.formattedDuration`, `formatFileSize`, the date sort and the
+    date-grouping logic are pure functions and trivially unit-testable. `toAlbums()` is the
+    newest and most valuable target — it owns grouping, cover selection and ordering. There is
+    currently no test source set.
 
 ---
 
