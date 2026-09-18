@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Adaptive-icon foreground: a photo card with a sun and mountains.
+
+  The 108x108dp canvas has only a 66dp centred safe zone — everything outside can be cropped
+  by aggressive launcher masks. The card is kept inside x 28..80, y 36..72, whose furthest
+  corner sits ~32dp from centre, just inside the 33dp safe radius.
+
+  Mountains are drawn oversized and clipped to the card, so they meet its rounded corners
+  cleanly instead of leaving a white margin.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Photo card -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M33,36 h42 a5,5 0 0 1 5,5 v26 a5,5 0 0 1 -5,5 h-42 a5,5 0 0 1 -5,-5 v-26 a5,5 0 0 1 5,-5 z" />
+
+    <group>
+        <clip-path
+            android:pathData="M33,36 h42 a5,5 0 0 1 5,5 v26 a5,5 0 0 1 -5,5 h-42 a5,5 0 0 1 -5,-5 v-26 a5,5 0 0 1 5,-5 z" />
+
+        <!-- Sun, drawn before the ridgeline so the peaks overlap it -->
+        <path
+            android:fillColor="#FF1B6BF3"
+            android:pathData="M41,48 m-5,0 a5,5 0 1,0 10,0 a5,5 0 1,0 -10,0" />
+
+        <!-- Ridgeline -->
+        <path
+            android:fillColor="#FF1B6BF3"
+            android:pathData="M24,76 L45,52 L56,65 L67,50 L84,76 Z" />
+    </group>
+</vector>
