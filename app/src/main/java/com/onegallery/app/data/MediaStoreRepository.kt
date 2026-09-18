@@ -16,6 +16,7 @@ import com.onegallery.app.domain.Album
 import com.onegallery.app.domain.DateGroupedMedia
 import com.onegallery.app.domain.MediaItem
 import com.onegallery.app.domain.MediaType
+import com.onegallery.app.domain.toAlbums
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
@@ -243,20 +244,15 @@ class MediaStoreRepository(private val context: Context) {
         )
     }
 
+    /**
+     * Standalone album query, for callers that do not already hold the media list.
+     *
+     * The UI does **not** use this — GalleryGridScreen derives albums from the list the
+     * ViewModel already holds, via [toAlbums], avoiding a second full-library query on a
+     * 3k-item device. Grouping logic lives in [toAlbums] so both paths stay in agreement.
+     */
     suspend fun queryAlbums(): List<Album> = withContext(Dispatchers.IO) {
-        val items = queryMediaItems()
-        items.groupBy { it.bucketId }
-            .map { (bucketId, mediaList) ->
-                val first = mediaList.first()
-                Album(
-                    id = bucketId,
-                    name = first.bucketName,
-                    coverUri = first.uri,
-                    count = mediaList.size,
-                    relativePath = File(first.path).parent ?: ""
-                )
-            }
-            .sortedByDescending { it.count }
+        queryMediaItems().toAlbums()
     }
 
     suspend fun queryGroupedByDate(): List<DateGroupedMedia> = withContext(Dispatchers.IO) {

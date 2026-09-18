@@ -51,6 +51,31 @@ data class Album(
     val relativePath: String
 )
 
+/**
+ * Groups an already-loaded media list into device folders (MediaStore buckets).
+ *
+ * Derives from the list the ViewModel already holds rather than issuing a second MediaStore
+ * query — on a real library (3k+ items) a re-query is the single most expensive thing the UI
+ * can do. Pure function, so it is cheap to `remember` and trivial to unit test.
+ *
+ * Expects [this] sorted newest-first (as `MediaStoreRepository` returns it), which makes the
+ * first item of each group both the album cover and its recency key.
+ */
+fun List<MediaItem>.toAlbums(): List<Album> =
+    groupBy { it.bucketId }
+        .map { (bucketId, itemsInBucket) ->
+            val newest = itemsInBucket.first()
+            newest.dateTaken to Album(
+                id = bucketId,
+                name = newest.bucketName,
+                coverUri = newest.uri,
+                count = itemsInBucket.size,
+                relativePath = newest.path.substringBeforeLast('/', "")
+            )
+        }
+        .sortedByDescending { (newestDate, _) -> newestDate }
+        .map { (_, album) -> album }
+
 data class DateGroupedMedia(
     val dateHeader: String,
     val timestamp: Long,

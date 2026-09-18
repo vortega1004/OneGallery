@@ -41,6 +41,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.onegallery.app.domain.MediaItem
 import com.onegallery.app.ui.grid.GalleryGridScreen
+import com.onegallery.app.ui.grid.TAB_PICTURES
 import com.onegallery.app.ui.theme.DarkBackground
 import com.onegallery.app.ui.theme.OneGalleryTheme
 import com.onegallery.app.ui.viewer.MediaViewerScreen
@@ -164,21 +165,48 @@ fun GalleryApp(viewModel: GalleryViewModel) {
     val mediaItems by viewModel.mediaItems.collectAsStateWithLifecycle()
     var selectedItemIndex by rememberSaveable { mutableIntStateOf(-1) }
 
-    // System back / back gesture returns to the grid instead of leaving the app
-    BackHandler(enabled = selectedItemIndex >= 0) {
-        selectedItemIndex = -1
+    // Grid browsing state lives here, not in GalleryGridScreen: the viewer *replaces* the grid
+    // in the composition, so state owned by the grid would be discarded every time a photo is
+    // opened. Holding it here is what makes back-from-viewer return to the album you were in.
+    var selectedTab by rememberSaveable { mutableIntStateOf(TAB_PICTURES) }
+    var openedAlbumId by rememberSaveable { mutableStateOf<String?>(null) }
+    var columnCount by rememberSaveable { mutableIntStateOf(3) }
+
+    // Which album the viewer was opened from; null means the flat Pictures grid.
+    var viewerAlbumId by rememberSaveable { mutableStateOf<String?>(null) }
+
+    // Scope the pager to the set the user was actually looking at, so swiping inside an album
+    // stays inside that album. Kept as a bucket id rather than a list so it survives process
+    // death and still tracks live MediaStore updates.
+    val viewerItems = remember(mediaItems, viewerAlbumId) {
+        viewerAlbumId?.let { id -> mediaItems.filter { it.bucketId == id } } ?: mediaItems
     }
 
-    if (selectedItemIndex >= 0 && mediaItems.isNotEmpty()) {
+    val closeViewer = {
+        selectedItemIndex = -1
+        viewerAlbumId = null
+    }
+
+    // System back / back gesture returns to the grid instead of leaving the app
+    BackHandler(enabled = selectedItemIndex >= 0) { closeViewer() }
+
+    if (selectedItemIndex >= 0 && viewerItems.isNotEmpty()) {
         MediaViewerScreen(
-            mediaItems = mediaItems,
+            mediaItems = viewerItems,
             initialIndex = selectedItemIndex,
-            onBack = { selectedItemIndex = -1 }
+            onBack = closeViewer
         )
     } else {
         GalleryGridScreen(
             mediaItems = mediaItems,
-            onItemClick = { index ->
+            selectedTab = selectedTab,
+            onTabChange = { selectedTab = it },
+            openedAlbumId = openedAlbumId,
+            onOpenAlbum = { openedAlbumId = it },
+            columnCount = columnCount,
+            onColumnCountChange = { columnCount = it },
+            onItemClick = { albumId, index ->
+                viewerAlbumId = albumId
                 selectedItemIndex = index
             }
         )
