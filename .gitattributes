@@ -1,0 +1,14 @@
+* text=auto eol=lf
+
+# The Gradle wrapper script MUST stay LF or it breaks on macOS/Linux/CI
+gradlew text eol=lf
+gradlew.bat text eol=crlf
+
+# Binary
+*.jar binary
+*.png binary
+*.jpg binary
+*.webp binary
+*.apk binary
+*.keystore binary
+*.jks binary
