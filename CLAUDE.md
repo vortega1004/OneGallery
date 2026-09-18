@@ -46,14 +46,15 @@ This project reverse-engineers and ports the standout UX paradigms from Samsung 
 
 ```
 app/src/main/java/com/onegallery/app/
+├── MainActivity.kt                   # Permission gate, ACTION_VIEW handling, grid/viewer switch
+├── GalleryViewModel.kt               # Owns the live MediaStore subscription (StateFlow)
 ├── data/
 │   └── MediaStoreRepository.kt       # Fast async query for photos, videos, albums, live observer
 ├── domain/
 │   └── MediaItem.kt                  # Models: MediaItem, MediaType (Photo, Video, MotionPhoto), Album
 ├── ui/
 │   ├── filmstrip/
-│   │   ├── FilmStripInfinityViewer.kt # Jetpack Compose implementation of magnifying scrubber
-│   │   └── FilmStripLayoutManager.kt  # Custom Android View implementation matching Samsung
+│   │   └── FilmStripInfinityViewer.kt # Jetpack Compose implementation of magnifying scrubber
 │   ├── video/
 │   │   ├── VideoPlayerView.kt         # Media3 ExoPlayer with floating snapshot shutter
 │   │   └── VideoSnapshotManager.kt    # Dual-path frame extraction and EXIF background saver

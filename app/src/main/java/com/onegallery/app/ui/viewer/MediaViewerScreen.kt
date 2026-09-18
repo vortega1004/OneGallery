@@ -8,23 +8,27 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroidSize
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Favorite
@@ -41,16 +45,21 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -62,6 +71,7 @@ import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.abs
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
@@ -82,7 +92,21 @@ fun MediaViewerScreen(
     var showDetailsSheet by remember { mutableStateOf(false) }
     val detailsSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
-    val currentItem = mediaItems[pagerState.currentPage]
+    // The pager re-clamps its page only on the next measure pass, so when the library shrinks
+    // (file deleted elsewhere) currentPage can briefly point past the end of the new list.
+    val currentPage = pagerState.currentPage.coerceIn(0, mediaItems.lastIndex)
+    val currentItem = mediaItems[currentPage]
+
+    // Measured overlay heights, handed to the video page so its controls sit clear of the bars
+    val density = LocalDensity.current
+    var topBarHeightPx by remember { mutableIntStateOf(0) }
+    var bottomBarHeightPx by remember { mutableIntStateOf(0) }
+    val videoControlsPadding = with(density) {
+        PaddingValues(top = topBarHeightPx.toDp(), bottom = bottomBarHeightPx.toDp())
+    }
+
+    val dateFormat = remember { SimpleDateFormat("MMM d, yyyy", Locale.getDefault()) }
+    val timeFormat = remember { SimpleDateFormat("h:mm a", Locale.getDefault()) }
 
     Box(
         modifier = modifier
@@ -96,16 +120,23 @@ fun MediaViewerScreen(
             key = { index -> mediaItems[index].id }
         ) { pageIndex ->
             val item = mediaItems[pageIndex]
+            val isActivePage = pagerState.settledPage == pageIndex
 
             if (item.isVideo) {
+                // Video controls share the viewer's overlay visibility, so one tap hides/shows both
                 VideoPlayerView(
                     mediaItem = item,
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier.fillMaxSize(),
+                    isActivePage = isActivePage,
+                    controlsVisible = isOverlayVisible,
+                    onControlsVisibleChange = { isOverlayVisible = it },
+                    controlsPadding = videoControlsPadding
                 )
             } else {
                 // Zoomable image viewer
                 ZoomableImageView(
                     mediaItem = item,
+                    isActivePage = isActivePage,
                     onTap = { isOverlayVisible = !isOverlayVisible }
                 )
             }
@@ -121,8 +152,10 @@ fun MediaViewerScreen(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .onSizeChanged { topBarHeightPx = it.height }
                     .background(Color(0x99000000))
-                    .padding(top = 40.dp, bottom = 12.dp, start = 8.dp, end = 8.dp)
+                    .statusBarsPadding()
+                    .padding(top = 4.dp, bottom = 12.dp, start = 8.dp, end = 8.dp)
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -132,17 +165,15 @@ fun MediaViewerScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = onBack) {
                             Icon(
-                                imageVector = Icons.Rounded.ArrowBack,
+                                imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
                                 contentDescription = "Back",
                                 tint = Color.White
                             )
                         }
 
                         Column(modifier = Modifier.padding(start = 4.dp)) {
-                            val formattedDate = SimpleDateFormat("MMM d, yyyy", Locale.getDefault())
-                                .format(Date(currentItem.dateTaken))
-                            val formattedTime = SimpleDateFormat("h:mm a", Locale.getDefault())
-                                .format(Date(currentItem.dateTaken))
+                            val formattedDate = dateFormat.format(Date(currentItem.dateTaken))
+                            val formattedTime = timeFormat.format(Date(currentItem.dateTaken))
 
                             Text(
                                 text = formattedDate,
@@ -188,16 +219,20 @@ fun MediaViewerScreen(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .onSizeChanged { bottomBarHeightPx = it.height }
                     .background(Color(0xCC000000))
+                    .navigationBarsPadding()
             ) {
                 // Samsung Filmstrip Infinity Scrubber
                 FilmStripInfinityViewer(
                     mediaItems = mediaItems,
-                    currentIndex = pagerState.currentPage,
-                    isViewerScrolling = pagerState.isScrollInProgress,
+                    currentIndex = currentPage,
+                    pagerPosition = { pagerState.currentPage + pagerState.currentPageOffsetFraction },
                     onItemSelected = { targetIndex ->
+                        // Snap, don't animate: the strip reports every thumbnail it passes while
+                        // scrubbing, and the pager has to keep up with it 1:1
                         coroutineScope.launch {
-                            pagerState.animateScrollToPage(targetIndex)
+                            pagerState.scrollToPage(targetIndex)
                         }
                     }
                 )
@@ -256,11 +291,21 @@ fun MediaViewerScreen(
 @Composable
 private fun ZoomableImageView(
     mediaItem: MediaItem,
+    isActivePage: Boolean,
     onTap: () -> Unit
 ) {
     var scale by remember { mutableFloatStateOf(1f) }
     var offsetX by remember { mutableFloatStateOf(0f) }
     var offsetY by remember { mutableFloatStateOf(0f) }
+
+    // Swiping away from a zoomed photo shouldn't leave it zoomed when the user comes back
+    LaunchedEffect(isActivePage) {
+        if (!isActivePage) {
+            scale = 1f
+            offsetX = 0f
+            offsetY = 0f
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -276,15 +321,59 @@ private fun ZoomableImageView(
                 )
             }
             .pointerInput(Unit) {
-                detectTransformGestures { _, pan, zoom, _ ->
-                    scale = (scale * zoom).coerceIn(1f, 4f)
-                    if (scale > 1f) {
-                        offsetX += pan.x
-                        offsetY += pan.y
-                    } else {
-                        offsetX = 0f
-                        offsetY = 0f
-                    }
+                // detectTransformGestures consumes every drag past touch slop, which starves the
+                // enclosing HorizontalPager of its swipe. This loop only claims the gesture when
+                // it really zooms or pans the image; a one-finger drag at 1x, or a push past the
+                // horizontal edge of a zoomed image, stays unconsumed so the pager can page.
+                awaitEachGesture {
+                    var accumulatedZoom = 1f
+                    var accumulatedPan = Offset.Zero
+                    var pastTouchSlop = false
+                    val touchSlop = viewConfiguration.touchSlop
+
+                    awaitFirstDown(requireUnconsumed = false)
+                    do {
+                        val event = awaitPointerEvent()
+                        val canceled = event.changes.any { it.isConsumed }
+                        if (!canceled) {
+                            val zoomChange = event.calculateZoom()
+                            val panChange = event.calculatePan()
+
+                            if (!pastTouchSlop) {
+                                accumulatedZoom *= zoomChange
+                                accumulatedPan += panChange
+                                val centroidSize = event.calculateCentroidSize(useCurrent = false)
+                                val zoomMotion = abs(1 - accumulatedZoom) * centroidSize
+                                if (zoomMotion > touchSlop || accumulatedPan.getDistance() > touchSlop) {
+                                    pastTouchSlop = true
+                                }
+                            }
+
+                            if (pastTouchSlop) {
+                                val isMultiTouch = event.changes.count { it.pressed } > 1
+                                val newScale = (scale * zoomChange).coerceIn(1f, 4f)
+                                val maxOffsetX = (newScale - 1f) * size.width / 2f
+                                val maxOffsetY = (newScale - 1f) * size.height / 2f
+                                val newOffsetX = (offsetX + panChange.x).coerceIn(-maxOffsetX, maxOffsetX)
+                                val newOffsetY = (offsetY + panChange.y).coerceIn(-maxOffsetY, maxOffsetY)
+
+                                val pushesPastHorizontalEdge = newOffsetX == offsetX &&
+                                    abs(panChange.x) > abs(panChange.y)
+                                val movesImage = newScale != scale ||
+                                    newOffsetX != offsetX ||
+                                    newOffsetY != offsetY
+
+                                if (isMultiTouch || (movesImage && !pushesPastHorizontalEdge)) {
+                                    scale = newScale
+                                    offsetX = newOffsetX
+                                    offsetY = newOffsetY
+                                    event.changes.forEach {
+                                        if (it.positionChanged()) it.consume()
+                                    }
+                                }
+                            }
+                        }
+                    } while (!canceled && event.changes.any { it.pressed })
                 }
             },
         contentAlignment = Alignment.Center

@@ -1,7 +1,9 @@
 # OneGallery — Engineering Handoff
 
 **Last verified:** 2026-09-18
-**Status:** Builds clean and runs on the emulator. Not yet run on a physical device.
+**Status:** The committed baseline (`fbcc4f4`) builds clean and runs on the emulator (grid
+verified). The 2026-09-18 review-fix pass (§7) sits on top of it and has **not been compiled or
+run yet**. Not yet run on a physical device.
 **Owner:** Victor Ortega
 
 This document is the single source of truth for anyone — human or AI agent — picking up
@@ -14,10 +16,10 @@ by actually running it on the owner's machine, not inferred from reading code.
 
 | Item | Status |
 | --- | --- |
-| `gradlew assembleDebug` | **VERIFIED PASSING** — produces a ~21 MB `app-debug.apk` |
-| `gradlew assembleRelease` | **VERIFIED PASSING** |
-| Compile warnings | 1 (a deprecated icon, see §6.10) |
-| Run on emulator | **VERIFIED** — grid loads and renders thumbnails on `Pixel_9_Pro_XL` / API 37 |
+| `gradlew assembleDebug` | **NEEDS RE-VERIFY** — VERIFIED PASSING on the baseline (~21 MB `app-debug.apk`); the review-fix pass (§7) was written on a machine with no JDK / Android SDK and has not been compiled |
+| `gradlew assembleRelease` | **NEEDS RE-VERIFY** (same reason; passed on the baseline) |
+| Compile warnings | Unknown until rebuilt (baseline had 1, the deprecated icon, since fixed) |
+| Run on emulator | **VERIFIED on the baseline only** — grid loads and renders thumbnails on `Pixel_9_Pro_XL` / API 37. Not re-run since the review-fix pass |
 | Run on physical Pixel | **NOT YET DONE** |
 | Viewer / filmstrip / video capture | **NOT YET EXERCISED** — only the grid has been confirmed |
 | Automated tests | **NONE EXIST** |
@@ -39,7 +41,7 @@ were fixed on 2026-09-18 — see §7 for the changelog.
 | Android SDK | `C:\Users\V\AppData\Local\Android\Sdk` |
 | Installed platforms | android-35, android-36, android-36.1 |
 | `compileSdk` / `targetSdk` | 35 |
-| `minSdk` | 26 (but see §6.8 — effectively 29) |
+| `minSdk` | 29 |
 | Test AVD | `Pixel_9_Pro_XL`, system image `android-37` |
 
 ### First-time setup
@@ -82,20 +84,20 @@ exists; everything else is scaffolding around them.
 
 ## 4. Architecture
 
-Single-module app, MVI-ish, no DI framework, no ViewModels yet — state lives in composables
-and is passed down.
+Single-module app, MVI-ish, no DI framework. `GalleryViewModel` owns the media list; the rest
+of the UI state lives in composables and is passed down.
 
 ```
 app/src/main/java/com/onegallery/app/
-├── MainActivity.kt              # Permission gate + top-level grid/viewer switch
+├── MainActivity.kt              # Permission gate, ACTION_VIEW handling, grid/viewer switch
+├── GalleryViewModel.kt          # StateFlow of the media list (single MediaStore subscription)
 ├── data/MediaStoreRepository.kt # ContentResolver queries, ContentObserver, snapshot saver
 ├── domain/MediaItem.kt          # MediaItem, MediaType, Album, DateGroupedMedia
 └── ui/
     ├── grid/GalleryGridScreen.kt             # Pinch-zoom grid, bottom nav
     ├── viewer/MediaViewerScreen.kt           # HorizontalPager + zoomable image + overlays
     ├── viewer/MediaDetailsSheet.kt           # ModalBottomSheet with EXIF-ish details
-    ├── filmstrip/FilmStripInfinityViewer.kt  # ACTIVE — Compose implementation
-    ├── filmstrip/FilmStripLayoutManager.kt   # DEAD CODE — RecyclerView port, unreferenced
+    ├── filmstrip/FilmStripInfinityViewer.kt  # Compose filmstrip, 1:1 synced with the pager
     ├── video/VideoPlayerView.kt              # Media3 PlayerView + capture shutter UI
     ├── video/VideoSnapshotManager.kt         # Dual-path frame extraction
     └── theme/{Color,Theme}.kt                # One UI palettes
@@ -103,10 +105,22 @@ app/src/main/java/com/onegallery/app/
 
 ### Data flow
 
-`MediaStoreRepository.observeMediaItems()` returns a `callbackFlow<List<MediaItem>>` backed
-by a `ContentObserver`. `MainActivity.GalleryApp` collects it and hands the list to either
-`GalleryGridScreen` or `MediaViewerScreen`. There is no caching layer and no pagination —
-the entire media library is queried into memory on every change.
+`MediaStoreRepository.observeMediaItems()` is a `callbackFlow` whose `ContentObserver` only
+signals; the signals are conflated, rate-limited (300 ms) and mapped to a full query on
+`Dispatchers.IO`, then sorted in Kotlin by resolved date. `GalleryViewModel` exposes it as a
+`StateFlow` (`stateIn`, `WhileSubscribed(5s)`), which `GalleryApp` collects with
+`collectAsStateWithLifecycle` and hands to `GalleryGridScreen` or `MediaViewerScreen`. There is
+still no pagination — the entire media library is queried into memory on every change.
+
+**Filmstrip sync model:** whoever the user touches leads. When the pager moves, its fractional
+position (`currentPage + currentPageOffsetFraction`) is mirrored onto the strip with
+`scrollToItem` every frame. Any strip scroll the component did not start itself (drag, snap
+fling, thumbnail tap) is treated as a user scrub and each new center item is pushed to the
+pager with `scrollToPage`.
+
+**Viewer overlays:** `MediaViewerScreen.isOverlayVisible` is the single visibility state for
+the top bar, the filmstrip/action bar **and** the video controls. The overlay heights are
+measured and passed to `VideoPlayerView` as `controlsPadding` so nothing overlaps.
 
 ### Intentional design notes
 
@@ -114,7 +128,8 @@ the entire media library is queried into memory on every change.
   (`@android:drawable/ic_menu_gallery`, `@android:style/Theme.Material.NoActionBar`) so the
   project needs no `res/values/themes.xml`. `res/drawable/` and `res/values/` exist but are
   empty. If you add resources that's fine — just don't assume they were forgotten.
-- **`viewBinding = true`** is enabled in `app/build.gradle.kts` but unused. Harmless.
+- **Edge-to-edge** is enabled in `MainActivity` with forced light system-bar icons, because
+  the UI is hardcoded dark (§6.9). Revisit together with the light theme pass.
 
 ---
 
@@ -163,132 +178,146 @@ Videos go in `/sdcard/Movies/`, scanned the same way. Verify indexing with:
 adb shell content query --uri content://media/external/images/media --projection _display_name:relative_path
 ```
 
-When the permission dialog appears, **tap "Allow all"** — "Select photos…" currently
-dead-ends the app (§6.1).
+When the permission dialog appears, any choice should now work: "Allow all", "Select
+photos…" (partial access) or deny → retry / "Open settings" buttons. Please test all three.
 
 Manual smoke test, in order:
 
-1. Grid renders thumbnails; the count in the header is correct.
+1. Grid renders thumbnails; the count in the header is correct; screenshots/downloads appear
+   in date order (not at the bottom). Two-finger pinch changes the column count.
 2. Tap a photo → fullscreen viewer opens on the right image.
-3. Swipe the pager → filmstrip tracks and stays centered.
-4. Scrub the filmstrip → pager follows.
-5. Tap image → overlays toggle. Double-tap → zoom.
-6. Open a video → it plays, "Capture" button appears.
-7. Tap Capture → flash, thumbnail badge, new file in `Pictures/OneGallery_Captures`.
-8. Info button → details sheet shows correct resolution / size / path.
+3. **Swipe the pager with one finger → pages change** and the filmstrip tracks 1:1.
+4. Scrub the filmstrip / tap a thumbnail → pager follows and lands on the centered item.
+5. Tap image → overlays toggle. Double-tap / pinch → zoom; panning stops at the image edge;
+   swiping away and back resets the zoom.
+6. Open a video → it plays, "Capture" sits below the top bar, the seek bar sits above the
+   filmstrip, and tapping the video hides/shows everything together. Drag the seek bar.
+7. Swipe video → video: only the settled page plays. Press Home: audio stops.
+8. Tap Capture → flash, thumbnail badge, new file in `Pictures/OneGallery_Captures` dated next
+   to its source video, with GPS EXIF if the video had a location.
+9. Info button → details sheet shows correct resolution / size / path.
+10. System back in the viewer → returns to the grid (does not exit).
+11. From the Files app, "Open with" OneGallery on a photo → that photo opens. This also works
+    for files in `Download/` (Trap 1 above): the VIEW intent carries its own read grant, so it
+    does not depend on the MediaStore scope.
+12. Delete a file from another app while the viewer is open → no crash.
 
 ---
 
 ## 6. Known issues
 
-Ranked by how much they will affect a first test run. Each is traced to specific lines.
-**None of these block the build.**
+Ranked by how much they will affect a first test run. Section numbers are kept stable so old
+references still resolve; issues fixed in the 2026-09-18 review-fix pass are listed at the end.
 
-### 6.1 Permission dead-end on Android 14/15 — HIGH, affects Pixel testing
-
-`MainActivity.kt:38-42, 63-86`, `AndroidManifest.xml:7`
-
-The manifest declares `READ_MEDIA_VISUAL_USER_SELECTED`, which makes Android 14+ show a
-"Select photos…" option. But `checkAndRequestPermissions()` never requests that permission,
-and the result gate is `permissions.values.any { it }`. Choose partial access and every
-requested permission comes back denied → permanent permission screen.
-`PermissionRequestScreen` also ignores its `onRequest` parameter, so there is **no retry
-button** — the only escape is force-stop.
-
-*Fix:* add `READ_MEDIA_VISUAL_USER_SELECTED` to the requested array on API 34+, treat
-partial access as a valid granted state, and wire `onRequest` to a button.
-*Workaround for now:* tap "Allow all".
-
-### 6.2 Full MediaStore query runs on the main thread — HIGH
-
-`MediaStoreRepository.kt:36-61`
-
-`ContentObserver` is constructed with `Handler(Looper.getMainLooper())`, so every `onChange`
-runs `trySend(queryMediaItems())` — the entire cursor loop — on the main thread.
-`flowOn(Dispatchers.IO)` does **not** cover this; it only governs the `callbackFlow` builder
-block (the initial emission). Expect visible jank or an ANR on a real library.
-
-*Fix:* give the observer a background `Handler` (via `HandlerThread`), or have `onChange`
-only signal and let a coroutine in the flow's scope perform the query.
+> **Everything marked "fixed" below is UNVERIFIED** — written without a compiler or device.
+> Treat each as "should be fixed, confirm on the AVD" (§5 checklist).
 
 ### 6.3 The "instant TextureView" capture path never fires — HIGH (feature degraded)
 
-`VideoPlayerView.kt:161-179, 361-371`
+`VideoPlayerView.kt` (`PlayerView(ctx)` factory and `findTextureView`)
 
 **VERIFIED by decompiling `media3-ui-1.4.1`:** `PlayerView` reads `surface_type` from XML
 attributes and defaults to `SURFACE_TYPE_SURFACE_VIEW`. Constructed programmatically as
 `PlayerView(ctx)` with no attrs it creates a **SurfaceView**, so `findTextureView()` always
 returns `null`. (A SurfaceView's contents can't be read via `getBitmap()` anyway.)
 
-Capture still works, but always through the slower `MediaMetadataRetriever` fallback in
-`VideoSnapshotManager.extractHighResFrame()`. The "dual-engine" design described in
-`CLAUDE.md` is currently single-engine.
+Capture still works, but always through the slower `MediaMetadataRetriever` path in
+`VideoSnapshotManager.extractHighResFrame()`, so the thumbnail badge appears only once that
+finishes. `VideoSnapshotManager` is already structured for the real thing: the TextureView
+frame drives the instant thumbnail only, and the saved file is always the native-resolution
+frame.
 
 *Fix:* inflate `PlayerView` from a layout XML with `app:surface_type="texture_view"`, or drop
 `PlayerView` and attach your own `TextureView` via `player.setVideoTextureView(...)`.
 
 ### 6.4 Tabs and action buttons are non-functional — MEDIUM
 
-`GalleryGridScreen.kt:78-110`, `MediaViewerScreen.kt:169, 213-240`
+`GalleryGridScreen.kt` (bottom nav), `MediaViewerScreen.kt` (action bar)
 
 Albums and Search update `selectedTab` but the content never changes — the grid always
 renders Pictures. Share, Edit, Favorite, Delete and More are empty lambdas. `isFavorite` is
 hardcoded `false` and never read from `MediaStore.IS_FAVORITE`.
 
-### 6.5 Every video page builds its own autoplaying ExoPlayer — MEDIUM
+### 6.5 Every video page still builds its own ExoPlayer — LOW (was MEDIUM)
 
-`VideoPlayerView.kt:107-125`
+`VideoPlayerView.kt`
 
-`playWhenReady = true` and `REPEAT_MODE_ONE` per page, with no pause when the page scrolls
-off-center. Swiping between two videos can overlap audio. Consider a single shared player
-driven by `pagerState.currentPage`.
-
-### 6.6 Filmstrip draws two overlapping frames — LOW (cosmetic)
-
-`FilmStripInfinityViewer.kt:161-166, 203-212`
-
-The always-visible center bracket sits on top of the selected item's own white border.
-
-### 6.7 Pinch-to-zoom on the grid rarely triggers — LOW
-
-`GalleryGridScreen.kt:133-141`
-
-`detectTransformGestures` reports *per-event* zoom deltas (each ≈ 1.0), so the `> 1.25f` /
-`< 0.8f` thresholds almost never fire. Accumulate the factor across the gesture instead.
-
-### 6.8 `minSdk = 26` but the query needs API 29 — LOW (irrelevant on Pixel)
-
-`MediaStoreRepository.kt:66-81`
-
-**VERIFIED against `api-versions.xml`:** on `MediaStore.MediaColumns`, the fields
-`BUCKET_ID`, `BUCKET_DISPLAY_NAME`, `DATE_TAKEN`, `DURATION` and `ORIENTATION` are all
-`since="29"` (only `WIDTH` / `HEIGHT` are older). These are compile-time String constants, so
-they inline silently and lint does **not** flag them — but the query may throw on Android
-8/9. Either raise `minSdk` to 29 or branch the projection.
+Overlapping audio and background playback are fixed (only the settled pager page plays, and
+`ON_STOP` pauses). What remains is cost: each composed video page still creates and
+`prepare()`s its own player, including pages merely passed while scrubbing the filmstrip.
+Consider a single shared player driven by `pagerState.settledPage`.
 
 ### 6.9 Grid is hardcoded dark — LOW
 
-`GalleryGridScreen.kt:72` and throughout. `Theme.kt` defines a complete light color scheme,
+`GalleryGridScreen.kt` and throughout. `Theme.kt` defines a complete light color scheme,
 but the grid hardcodes `DarkBackground` and `DarkText*`. Light mode looks half-finished.
+`MainActivity` forces light system-bar icons to match; undo that when this is fixed.
 
-### 6.10 Deprecated icon — TRIVIAL (the only compile warning)
+### 6.13 Partial access can't be widened from inside the app — LOW
 
-`MediaViewerScreen.kt:135` — use `Icons.AutoMirrored.Rounded.ArrowBack`.
+With "Select photos…" (Android 14+) the gallery shows only the chosen items and offers no
+"select more" entry point. Re-requesting the media permissions re-opens the system picker.
 
-### 6.11 Dead code
+### 6.14 ACTION_VIEW items have synthetic metadata — LOW
 
-`FilmStripLayoutManager.kt` — a complete RecyclerView `LayoutManager` + `SnapHelper` port
-that nothing references. The Compose `FilmStripInfinityViewer` is what actually runs. Keep it
-as a reference or delete it, but don't "fix" it thinking it's live.
+`MediaStoreRepository.mediaItemFromUri()` builds a standalone `MediaItem` (id `-1`, no path,
+no dimensions, date = now) for content handed over by other apps, so the details sheet is
+sparse for those. The viewer shows that one item only — no filmstrip neighbours.
 
-### 6.12 Viewer can crash if the library shrinks while open — LOW
+### Fixed on 2026-09-18 (unverified — see note above)
 
-`MediaViewerScreen.kt:85` indexes `mediaItems[pagerState.currentPage]`. If the
-`ContentObserver` fires with a shorter list while the viewer is open, this can throw.
+| # | Issue | Resolution |
+| --- | --- | --- |
+| 6.1 | Permission dead-end on Android 14/15 | `READ_MEDIA_VISUAL_USER_SELECTED` requested; any media grant (full/partial/images-only) counts; retry + "Open settings" buttons; re-check in `onStart` |
+| 6.2 | Full MediaStore query on the main thread | Observer only signals; conflated + rate-limited query on `Dispatchers.IO`; flow owned by `GalleryViewModel` |
+| 6.6 | Filmstrip drew two overlapping frames | Per-item border removed; the center bracket is the selection marker |
+| 6.7 | Grid pinch-to-zoom rarely triggered | Zoom accumulated across the gesture, handled in the Initial pass so scrolling can't cancel it |
+| 6.8 | `minSdk = 26` but query needed API 29 | `minSdk` raised to 29; pre-Q branches and `WRITE_EXTERNAL_STORAGE` removed |
+| 6.10 | Deprecated icon warning | `Icons.AutoMirrored.Rounded.ArrowBack` |
+| 6.11 | Dead `FilmStripLayoutManager.kt` | Deleted (recover from git history if wanted) along with the `recyclerview` dependency |
+| 6.12 | Viewer crash when the library shrinks | Page index clamped before indexing |
 
 ---
 
 ## 7. Changelog
+
+### 2026-09-18 — code-review fix pass (**NOT COMPILED, NOT RUN**)
+
+Written on a machine with no JDK / Android SDK. First job for whoever picks this up: run
+`gradlew.bat assembleDebug`, fix any compile errors, then walk the §5 checklist.
+
+Bugs found in review (none were in the previous known-issues list unless noted):
+
+1. **Photo pages couldn't be swiped.** `detectTransformGestures` consumed every one-finger
+   drag, starving `HorizontalPager`. Replaced with a gesture loop that only consumes when it
+   actually zooms/pans; offsets are clamped to the image; zoom resets when the page leaves.
+2. **Viewer overlays covered the video controls and could not be hidden on video pages.**
+   Visibility is now one hoisted state; control positions use measured overlay heights.
+3. **Permission dead-end** (§6.1).
+4. **System back exited the app from the viewer.** Added `BackHandler`.
+5. **Media flow rebuilt on every recomposition + main-thread queries** (§6.2). Added
+   `GalleryViewModel`.
+6. **Items with NULL `DATE_TAKEN` sorted to the bottom.** Sort moved to Kotlin, on the
+   resolved date.
+7. **Crash when the library shrinks with the viewer open** (§6.12).
+8. **Videos autoplayed on every composed page and kept playing in the background** (§6.5).
+9. **Filmstrip ↔ pager sync** captured stale parameters, fed its own programmatic scrolls back
+   to the pager, could skip a sync, rested 2 dp off-center, and recomposed every thumbnail per
+   scroll frame. Rewritten around true 1:1 position mirroring (§4).
+10. **`ACTION_VIEW` intent filter was declared but ignored.** Now opens the item (§6.14).
+
+Smaller fixes: snapshot save no longer leaves orphaned `IS_PENDING` rows and writes EXIF
+(date, GPS from the video, user comment) before publishing; stills are dated at the video's
+capture time + playback position; the 300 ms capture timeout that saved nothing was removed
+and the saved file is always the high-res frame; the thumbnail badge uses a 256 px bitmap and
+restarts its timer per capture; the seek-bar thumb follows the finger while dragging; the
+position ticker stops while paused; edge-to-edge with real window insets instead of fixed
+`40.dp`/`48.dp`; `SimpleDateFormat`s hoisted out of composition.
+
+Build/config: `minSdk` 29; removed `viewBinding`, `navigation-compose`, `recyclerview`,
+`coil-network-okhttp`, and the `VIBRATE` / `WRITE_EXTERNAL_STORAGE` permissions; added
+`lifecycle-runtime-compose`; Coil `3.0.0-rc01` → `3.0.4` (**new artifacts — first build needs
+network**).
 
 ### 2026-09-18 — first successful run on an emulator
 
@@ -338,32 +367,35 @@ Still unexercised on-device: the viewer, filmstrip sync, and video frame capture
 
 Roughly dependency-ordered. Good first tasks are marked ★.
 
-1. ★ Finish the on-device smoke test. The grid is confirmed working; the viewer, filmstrip
-   sync and video frame capture are still unexercised. Load a video into `/sdcard/Movies/`
-   per §5 and work through the checklist below.
-2. ★ Fix the permission dead-end (§6.1) — highest user-facing risk.
-3. Move the `ContentObserver` query off the main thread (§6.2).
-4. Restore the real TextureView capture path (§6.3).
-5. Introduce a `ViewModel` so media state survives rotation and the repository isn't
-   reconstructed inside `VideoPlayerView` (`VideoPlayerView.kt:92`).
-6. Implement Share and Delete via `MediaStore` + `IntentSender` (§6.4).
-7. Wire the Albums tab to the already-written `queryAlbums()`, and date headers to
+1. ★ **Compile the review-fix pass** (`gradlew.bat assembleDebug` + `assembleRelease`) and fix
+   whatever the compiler finds. Then restore the VERIFIED markers in §1.
+2. ★ Re-run on the `Pixel_9_Pro_XL` AVD and finish the on-device smoke test. Before the
+   review-fix pass only the grid was confirmed; the viewer, filmstrip sync and video frame
+   capture have never been exercised. Load a photo set and a video (`/sdcard/Movies/`) per §5
+   and walk the checklist — especially pager swiping, filmstrip sync feel, and the three
+   permission paths.
+3. Restore the real TextureView capture path (§6.3).
+4. Move `MediaStoreRepository` creation out of `VideoPlayerView` (it builds its own; pass the
+   ViewModel's instance or a snapshot callback down instead).
+5. Implement Share and Delete via `MediaStore` + `IntentSender` (§6.4).
+6. Wire the Albums tab to the already-written `queryAlbums()`, and date headers to
    `queryGroupedByDate()` — both exist in the repository but nothing calls them.
-8. Add a shared ExoPlayer across pager pages (§6.5).
-9. Light theme pass (§6.9).
-10. First tests: `MediaItem.formattedDuration`, `formatFileSize`, and the date-grouping logic
-    are pure functions and trivially unit-testable. There is currently no test source set.
+7. Add a shared ExoPlayer across pager pages (§6.5).
+8. Light theme pass (§6.9).
+9. First tests: `MediaItem.formattedDuration`, `formatFileSize`, the date sort and the
+   date-grouping logic are pure functions and trivially unit-testable. There is currently no
+   test source set.
 
 ---
 
 ## 9. Conventions for AI coding agents
 
 - **Verify, don't assume.** Run `gradlew.bat assembleDebug` after any change. This codebase
-  previously shipped a state that looked correct and did not compile.
+  previously shipped a state that looked correct and did not compile. If you cannot build
+  (no JDK/SDK on the machine), say so loudly in §1 and §7 — as the 2026-09-18 pass did.
 - **Don't trust the docs over the code.** `CLAUDE.md` and `README.md` describe intended
   Samsung behavior, some of it aspirational (see §6.3). Code is truth.
-- **Two dead ends to avoid:** `FilmStripLayoutManager.kt` is unused (§6.11), and `res/` is
-  intentionally empty (§4).
+- **One dead end to avoid:** `res/` is intentionally empty (§4).
 - **Never commit** `local.properties`, keystores, or `app/build/`.
 - **Don't bump `compileSdk` down** to silence the AGP warning; suppress it or upgrade AGP.
 - **State the scope of your testing** in PR descriptions — say whether you only compiled, or

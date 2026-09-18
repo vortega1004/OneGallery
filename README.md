@@ -46,14 +46,14 @@ gallery_clone/
 │       ├── AndroidManifest.xml           # Android 14/15 MediaStore permissions
 │       └── java/com/onegallery/app/
 │           ├── MainActivity.kt           # Permissions check & screen navigation
+│           ├── GalleryViewModel.kt       # Owns the live MediaStore subscription (StateFlow)
 │           ├── data/
 │           │   └── MediaStoreRepository.kt  # Fast ContentResolver queries & background saver
 │           ├── domain/
 │           │   └── MediaItem.kt             # Data models (MediaItem, MediaType, Album)
 │           ├── ui/
 │           │   ├── filmstrip/
-│           │   │   ├── FilmStripInfinityViewer.kt # Jetpack Compose magnifying scrubber
-│           │   │   └── FilmStripLayoutManager.kt  # Custom Android View implementation
+│           │   │   └── FilmStripInfinityViewer.kt # Jetpack Compose magnifying scrubber
 │           │   ├── video/
 │           │   │   ├── VideoPlayerView.kt         # ExoPlayer + floating 1-tap shutter
 │           │   │   └── VideoSnapshotManager.kt    # Dual-path frame extraction & EXIF saver
@@ -113,17 +113,20 @@ adb shell content call --uri content://media --method scan_file --arg /sdcard/Pi
 
 Put videos in `/sdcard/Movies/` and scan them the same way.
 
-When the permission dialog appears, tap **"Allow all"** — the "Select photos…" partial-access
-path currently dead-ends the app (see [HANDOFF.md](HANDOFF.md) §6.1).
+When the permission dialog appears, "Allow all", "Select photos…" (partial access) and deny →
+retry / "Open settings" are all meant to work since the review-fix pass — please test each
+(see [HANDOFF.md](HANDOFF.md) §5).
 
 ---
 
 ## Project status
 
-As of 2026-09-18: `assembleDebug` and `assembleRelease` both pass, and the app runs on the
-emulator with the photo grid loading and rendering thumbnails. The viewer, filmstrip sync and
-video frame capture have **not** been exercised on-device yet, it has not been run on a
-physical device, and there are no automated tests.
+As of 2026-09-18: the committed baseline passes `assembleDebug` and `assembleRelease` and runs
+on the emulator with the photo grid loading and rendering thumbnails. A code-review fix pass
+(HANDOFF.md §7) has since been applied on top and has **not been compiled or run yet** —
+rebuild before trusting it. The viewer, filmstrip sync and video frame capture have **not**
+been exercised on-device, it has not been run on a physical device, and there are no
+automated tests.
 
 Known issues are documented with file/line references in **[HANDOFF.md](HANDOFF.md)** — read
 that before contributing. It also carries the architecture map, the suggested work queue, and
