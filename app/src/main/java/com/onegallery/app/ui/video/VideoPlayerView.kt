@@ -19,10 +19,10 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -40,7 +40,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -57,10 +57,11 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.media3.common.MediaItem as ExoMediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -78,29 +79,40 @@ import kotlinx.coroutines.launch
  * - Direct floating shutter button in the top-left (no edit mode needed!)
  * - Instant frame capture with zero playback disruption
  * - Shutter flash feedback + animated thumbnail fly-in
+ *
+ * The controls share their visibility with the host screen's overlays ([controlsVisible]) and are
+ * laid out inside [controlsPadding] so the host's top/bottom bars never cover them. Playback only
+ * runs while [isActivePage] is true and the app is in the foreground.
  */
 @OptIn(UnstableApi::class)
 @Composable
 fun VideoPlayerView(
     mediaItem: MediaItem,
     modifier: Modifier = Modifier,
+    isActivePage: Boolean = true,
+    controlsVisible: Boolean = true,
+    onControlsVisibleChange: (Boolean) -> Unit = {},
+    controlsPadding: PaddingValues = PaddingValues(0.dp),
     onSnapshotTaken: ((Bitmap) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
     val coroutineScope = rememberCoroutineScope()
-    val repository = remember { MediaStoreRepository(context) }
-    val snapshotManager = remember { VideoSnapshotManager(context, repository) }
+    val repository = remember { MediaStoreRepository(context.applicationContext) }
+    val snapshotManager = remember { VideoSnapshotManager(context.applicationContext, repository) }
 
-    var isPlaying by remember { mutableStateOf(true) }
+    var isPlaying by remember { mutableStateOf(false) }
     var currentPositionMs by remember { mutableLongStateOf(0L) }
     var durationMs by remember { mutableLongStateOf(mediaItem.durationMs) }
-    var controlsVisible by remember { mutableStateOf(true) }
+    // Non-null while the user drags the scrubber, so the thumb follows the finger, not the ticker
+    var seekPositionMs by remember { mutableStateOf<Float?>(null) }
+    var resumeOnStart by remember { mutableStateOf(false) }
 
     // Flash & thumbnail drop state
     val flashAlpha = remember { Animatable(0f) }
     var capturedThumb by remember { mutableStateOf<Bitmap?>(null) }
     var showCapturedBadge by remember { mutableStateOf(false) }
+    var captureCount by remember { mutableIntStateOf(0) }
 
     var textureViewRef by remember { mutableStateOf<TextureView?>(null) }
 
@@ -108,7 +120,7 @@ fun VideoPlayerView(
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(ExoMediaItem.fromUri(mediaItem.uri))
             prepare()
-            playWhenReady = true
+            playWhenReady = false
             repeatMode = Player.REPEAT_MODE_ONE
             addListener(object : Player.Listener {
                 override fun onIsPlayingChanged(playing: Boolean) {
@@ -124,19 +136,45 @@ fun VideoPlayerView(
         }
     }
 
+    // Only the settled pager page plays; neighbours composed during a swipe stay paused
+    LaunchedEffect(exoPlayer, isActivePage) {
+        if (isActivePage) exoPlayer.play() else exoPlayer.pause()
+    }
+
+    // Never keep playing (or looping audio) from the background
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        resumeOnStart = exoPlayer.playWhenReady
+        exoPlayer.pause()
+    }
+    LifecycleEventEffect(Lifecycle.Event.ON_START) {
+        if (resumeOnStart && isActivePage) exoPlayer.play()
+        resumeOnStart = false
+    }
+
     // Ticking position updater
-    LaunchedEffect(exoPlayer) {
-        while (true) {
-            currentPositionMs = exoPlayer.currentPosition
+    LaunchedEffect(exoPlayer, isPlaying) {
+        currentPositionMs = exoPlayer.currentPosition
+        while (isPlaying) {
             delay(100L)
+            currentPositionMs = exoPlayer.currentPosition
         }
     }
 
     // Auto-hide controls after 3 seconds
-    LaunchedEffect(controlsVisible, isPlaying) {
-        if (controlsVisible && isPlaying) {
+    val isSeeking = seekPositionMs != null
+    LaunchedEffect(controlsVisible, isPlaying, isActivePage, isSeeking) {
+        if (controlsVisible && isPlaying && isActivePage && !isSeeking) {
             delay(3000L)
-            controlsVisible = false
+            onControlsVisibleChange(false)
+        }
+    }
+
+    // Each capture restarts the badge timer, so a quick second capture isn't hidden early
+    LaunchedEffect(captureCount) {
+        if (captureCount > 0) {
+            showCapturedBadge = true
+            delay(2500L)
+            showCapturedBadge = false
         }
     }
 
@@ -154,7 +192,7 @@ fun VideoPlayerView(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null
             ) {
-                controlsVisible = !controlsVisible
+                onControlsVisibleChange(!controlsVisible)
             }
     ) {
         // Video Surface using PlayerView with TextureView for instant screen-buffer capture
@@ -193,7 +231,7 @@ fun VideoPlayerView(
             exit = fadeOut(),
             modifier = Modifier
                 .align(Alignment.TopStart)
-                .padding(top = 48.dp, start = 20.dp)
+                .padding(top = controlsPadding.calculateTopPadding() + 12.dp, start = 20.dp)
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -214,19 +252,15 @@ fun VideoPlayerView(
                             }
 
                             // Capture frame immediately
-                            val result = snapshotManager.captureCurrentFrame(
+                            snapshotManager.captureCurrentFrame(
                                 textureView = textureViewRef,
                                 videoItem = mediaItem,
                                 currentPositionMs = exoPlayer.currentPosition
-                            ) { instantBitmap ->
-                                capturedThumb = instantBitmap
-                                showCapturedBadge = true
-                                onSnapshotTaken?.invoke(instantBitmap)
+                            ) { thumbnail ->
+                                capturedThumb = thumbnail
+                                captureCount++
+                                onSnapshotTaken?.invoke(thumbnail)
                             }
-
-                            // Keep badge visible for 2.5 seconds
-                            delay(2500L)
-                            showCapturedBadge = false
                         }
                     }
                     .padding(horizontal = 14.dp, vertical = 8.dp)
@@ -253,7 +287,7 @@ fun VideoPlayerView(
             exit = scaleOut() + fadeOut(),
             modifier = Modifier
                 .align(Alignment.BottomStart)
-                .padding(start = 24.dp, bottom = 100.dp)
+                .padding(start = 24.dp, bottom = controlsPadding.calculateBottomPadding() + 88.dp)
         ) {
             capturedThumb?.let { bmp ->
                 Box(
@@ -265,7 +299,7 @@ fun VideoPlayerView(
                         .background(Color.Black)
                 ) {
                     Image(
-                        bitmap = bmp.asImageBitmap(),
+                        bitmap = remember(bmp) { bmp.asImageBitmap() },
                         contentDescription = "Captured Frame",
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize()
@@ -310,7 +344,11 @@ fun VideoPlayerView(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .padding(start = 24.dp, end = 24.dp, bottom = 20.dp)
+                .padding(
+                    start = 24.dp,
+                    end = 24.dp,
+                    bottom = controlsPadding.calculateBottomPadding() + 12.dp
+                )
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -319,18 +357,25 @@ fun VideoPlayerView(
                     .background(Color(0x88000000), RoundedCornerShape(16.dp))
                     .padding(horizontal = 16.dp, vertical = 6.dp)
             ) {
+                val maxPositionMs = durationMs.toFloat().coerceAtLeast(1f)
+
                 Text(
-                    text = formatMs(currentPositionMs),
+                    text = formatMs(seekPositionMs?.toLong() ?: currentPositionMs),
                     color = Color.White,
                     fontSize = 12.sp
                 )
 
                 Slider(
-                    value = currentPositionMs.toFloat().coerceIn(0f, durationMs.toFloat().coerceAtLeast(1f)),
+                    value = (seekPositionMs ?: currentPositionMs.toFloat()).coerceIn(0f, maxPositionMs),
                     onValueChange = { newPos ->
+                        seekPositionMs = newPos
                         exoPlayer.seekTo(newPos.toLong())
                     },
-                    valueRange = 0f..durationMs.toFloat().coerceAtLeast(1f),
+                    onValueChangeFinished = {
+                        seekPositionMs?.let { currentPositionMs = it.toLong() }
+                        seekPositionMs = null
+                    },
+                    valueRange = 0f..maxPositionMs,
                     colors = SliderDefaults.colors(
                         thumbColor = Color.White,
                         activeTrackColor = OneUIBlue,

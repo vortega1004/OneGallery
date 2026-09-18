@@ -3,7 +3,9 @@ package com.onegallery.app.ui.grid
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -42,7 +44,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -131,12 +135,28 @@ fun GalleryGridScreen(
                 modifier = Modifier
                     .fillMaxSize()
                     .pointerInput(Unit) {
-                        detectTransformGestures { _, _, zoom, _ ->
-                            if (zoom > 1.25f && columnCount > 1) {
-                                columnCount--
-                            } else if (zoom < 0.8f && columnCount < 5) {
-                                columnCount++
-                            }
+                        // Runs in the Initial pass so a two-finger pinch is claimed before the
+                        // grid's own scrolling sees (and consumes) it. Zoom deltas arrive per
+                        // event (each ~1.0), so they are accumulated across the gesture.
+                        awaitEachGesture {
+                            var cumulativeZoom = 1f
+                            awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                            do {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                if (event.changes.count { it.pressed } >= 2) {
+                                    cumulativeZoom *= event.calculateZoom()
+                                    if (cumulativeZoom > 1.25f) {
+                                        if (columnCount > 1) columnCount--
+                                        cumulativeZoom = 1f
+                                    } else if (cumulativeZoom < 0.8f) {
+                                        if (columnCount < 5) columnCount++
+                                        cumulativeZoom = 1f
+                                    }
+                                    event.changes.forEach {
+                                        if (it.positionChanged()) it.consume()
+                                    }
+                                }
+                            } while (event.changes.any { it.pressed })
                         }
                     }
             ) {

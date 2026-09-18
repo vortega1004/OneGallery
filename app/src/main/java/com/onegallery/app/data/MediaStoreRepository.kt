@@ -6,12 +6,11 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.ContentObserver
 import android.graphics.Bitmap
+import android.media.MediaMetadataRetriever
 import android.net.Uri
-import android.os.Build
 import android.os.Environment
-import android.os.Handler
-import android.os.Looper
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import androidx.exifinterface.media.ExifInterface
 import com.onegallery.app.domain.Album
 import com.onegallery.app.domain.DateGroupedMedia
@@ -19,12 +18,15 @@ import com.onegallery.app.domain.MediaItem
 import com.onegallery.app.domain.MediaType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.transform
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.FileOutputStream
+import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -33,10 +35,11 @@ class MediaStoreRepository(private val context: Context) {
 
     private val contentResolver: ContentResolver = context.contentResolver
 
-    fun observeMediaItems(): Flow<List<MediaItem>> = callbackFlow {
-        val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
+    fun observeMediaItems(): Flow<List<MediaItem>> = callbackFlow<Unit> {
+        // The observer only signals; the query itself runs downstream on Dispatchers.IO
+        val observer = object : ContentObserver(null) {
             override fun onChange(selfChange: Boolean, uri: Uri?) {
-                trySend(queryMediaItems())
+                trySend(Unit)
             }
         }
 
@@ -53,12 +56,19 @@ class MediaStoreRepository(private val context: Context) {
         )
 
         // Initial emission
-        trySend(queryMediaItems())
+        trySend(Unit)
 
         awaitClose {
             contentResolver.unregisterContentObserver(observer)
         }
-    }.flowOn(Dispatchers.IO)
+    }
+        .conflate()
+        .transform<Unit, List<MediaItem>> {
+            emit(queryMediaItems())
+            // Bursts of changes (camera burst, sync, our own snapshot insert) collapse into one re-query
+            delay(CHANGE_BURST_WINDOW_MS)
+        }
+        .flowOn(Dispatchers.IO)
 
     fun queryMediaItems(bucketIdFilter: String? = null): List<MediaItem> {
         val items = mutableListOf<MediaItem>()
@@ -92,7 +102,6 @@ class MediaStoreRepository(private val context: Context) {
         }
 
         val selectionArgs = if (bucketIdFilter != null) arrayOf(bucketIdFilter) else null
-        val sortOrder = "${MediaStore.Files.FileColumns.DATE_TAKEN} DESC, ${MediaStore.Files.FileColumns.DATE_ADDED} DESC"
 
         val queryUri = MediaStore.Files.getContentUri("external")
 
@@ -101,7 +110,7 @@ class MediaStoreRepository(private val context: Context) {
             projection,
             selection,
             selectionArgs,
-            sortOrder
+            null
         )?.use { cursor ->
             val idCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
             val dataCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DATA)
@@ -171,7 +180,67 @@ class MediaStoreRepository(private val context: Context) {
             }
         }
 
+        // DATE_TAKEN is NULL for screenshots, downloads and many videos, so a SQL sort would push
+        // those to the end. Sort on the resolved date (which falls back to DATE_ADDED) instead.
+        items.sortWith(
+            compareByDescending<MediaItem> { it.dateTaken }.thenByDescending { it.dateAdded }
+        )
+
         return items
+    }
+
+    /**
+     * Builds a standalone item for a Uri handed to us by another app (ACTION_VIEW),
+     * which may not be part of MediaStore at all.
+     */
+    fun mediaItemFromUri(uri: Uri, mimeTypeHint: String?): MediaItem? {
+        val mimeType = mimeTypeHint?.takeUnless { it.endsWith("/*") }
+            ?: contentResolver.getType(uri)
+            ?: return null
+        val mediaType = when {
+            mimeType.startsWith("video/") -> MediaType.VIDEO
+            mimeType.equals("image/gif", ignoreCase = true) -> MediaType.GIF
+            mimeType.startsWith("image/") -> MediaType.IMAGE
+            else -> return null
+        }
+
+        var displayName = uri.lastPathSegment ?: "Media"
+        var size = 0L
+        try {
+            contentResolver.query(
+                uri,
+                arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE),
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val nameCol = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    val sizeCol = cursor.getColumnIndex(OpenableColumns.SIZE)
+                    if (nameCol >= 0 && !cursor.isNull(nameCol)) displayName = cursor.getString(nameCol)
+                    if (sizeCol >= 0 && !cursor.isNull(sizeCol)) size = cursor.getLong(sizeCol)
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        val now = System.currentTimeMillis()
+        return MediaItem(
+            id = -1L,
+            uri = uri,
+            path = "",
+            displayName = displayName,
+            mimeType = mimeType,
+            mediaType = mediaType,
+            dateTaken = now,
+            dateAdded = now / 1000,
+            size = size,
+            width = 0,
+            height = 0,
+            bucketId = "external",
+            bucketName = "Shared"
+        )
     }
 
     suspend fun queryAlbums(): List<Album> = withContext(Dispatchers.IO) {
@@ -224,50 +293,108 @@ class MediaStoreRepository(private val context: Context) {
         val fileName = "Snapshot_${timeStamp}_${playbackPositionMs}ms.jpg"
         val relativeSubDir = "${Environment.DIRECTORY_PICTURES}/OneGallery_Captures"
 
+        // Date the still like the moment it shows, so it sorts next to its source video
+        val frameTimeMs = if (sourceVideo.dateTaken > 0) {
+            sourceVideo.dateTaken + playbackPositionMs
+        } else {
+            System.currentTimeMillis()
+        }
+
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-            put(MediaStore.Images.Media.DATE_ADDED, System.currentTimeMillis() / 1000)
-            put(MediaStore.Images.Media.DATE_TAKEN, System.currentTimeMillis())
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                put(MediaStore.Images.Media.RELATIVE_PATH, relativeSubDir)
-                put(MediaStore.Images.Media.IS_PENDING, 1)
-            }
+            put(MediaStore.Images.Media.DATE_TAKEN, frameTimeMs)
+            put(MediaStore.Images.Media.RELATIVE_PATH, relativeSubDir)
+            put(MediaStore.Images.Media.IS_PENDING, 1)
         }
 
-        val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return@withContext null
-
+        var uri: Uri? = null
         try {
-            contentResolver.openOutputStream(uri)?.use { outputStream ->
-                bitmap.compress(Bitmap.CompressFormat.JPEG, 98, outputStream)
-            }
+            uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                ?: return@withContext null
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                values.clear()
-                values.put(MediaStore.Images.Media.IS_PENDING, 0)
-                contentResolver.update(uri, values, null, null)
-            }
-
-            // Copy EXIF orientation and tags if source file path is readable
-            if (sourceVideo.path.isNotEmpty() && File(sourceVideo.path).exists()) {
-                try {
-                    contentResolver.openFileDescriptor(uri, "rw")?.use { pfd ->
-                        val destExif = ExifInterface(pfd.fileDescriptor)
-                        destExif.setAttribute(
-                            ExifInterface.TAG_USER_COMMENT,
-                            "Captured from video: ${sourceVideo.displayName} at ${playbackPositionMs}ms"
-                        )
-                        destExif.saveAttributes()
-                    }
-                } catch (e: Exception) {
-                    e.printStackTrace()
+            val outputStream = contentResolver.openOutputStream(uri)
+                ?: throw IOException("Unable to open $uri for writing")
+            outputStream.use {
+                if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 98, it)) {
+                    throw IOException("JPEG encoding failed")
                 }
             }
+
+            // EXIF is written while the row is still pending so observers see one finished file
+            writeSnapshotExif(uri, sourceVideo, playbackPositionMs, frameTimeMs)
+
+            values.clear()
+            values.put(MediaStore.Images.Media.IS_PENDING, 0)
+            contentResolver.update(uri, values, null, null)
 
             uri
         } catch (e: Exception) {
             e.printStackTrace()
+            // Don't leave an orphaned pending row behind
+            uri?.let { failed ->
+                try {
+                    contentResolver.delete(failed, null, null)
+                } catch (_: Exception) {}
+            }
             null
         }
+    }
+
+    private fun writeSnapshotExif(
+        uri: Uri,
+        sourceVideo: MediaItem,
+        playbackPositionMs: Long,
+        frameTimeMs: Long
+    ) {
+        try {
+            contentResolver.openFileDescriptor(uri, "rw")?.use { pfd ->
+                val destExif = ExifInterface(pfd.fileDescriptor)
+                val exifDate = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US).format(Date(frameTimeMs))
+                destExif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, exifDate)
+                destExif.setAttribute(ExifInterface.TAG_DATETIME, exifDate)
+                destExif.setAttribute(
+                    ExifInterface.TAG_USER_COMMENT,
+                    "Captured from video: ${sourceVideo.displayName} at ${playbackPositionMs}ms"
+                )
+                readVideoLocation(sourceVideo.uri)?.let { (latitude, longitude) ->
+                    destExif.setLatLong(latitude, longitude)
+                }
+                destExif.saveAttributes()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    /** Reads the ISO-6709 location string ("+37.4219-122.0840/") recorded in the video container. */
+    private fun readVideoLocation(videoUri: Uri): Pair<Double, Double>? {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            // MediaStore redacts location unless the original file is requested (ACCESS_MEDIA_LOCATION)
+            try {
+                retriever.setDataSource(context, MediaStore.setRequireOriginal(videoUri))
+            } catch (_: Exception) {
+                retriever.setDataSource(context, videoUri)
+            }
+            val location = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_LOCATION)
+                ?: return null
+            val match = ISO_6709_PATTERN.find(location) ?: return null
+            val latitude = match.groupValues[1].toDoubleOrNull() ?: return null
+            val longitude = match.groupValues[2].toDoubleOrNull() ?: return null
+            latitude to longitude
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        } finally {
+            try {
+                retriever.release()
+            } catch (_: Exception) {}
+        }
+    }
+
+    private companion object {
+        const val CHANGE_BURST_WINDOW_MS = 300L
+        val ISO_6709_PATTERN = Regex("""([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)""")
     }
 }

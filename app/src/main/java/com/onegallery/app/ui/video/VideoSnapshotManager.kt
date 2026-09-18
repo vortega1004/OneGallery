@@ -8,10 +8,9 @@ import android.view.TextureView
 import com.onegallery.app.data.MediaStoreRepository
 import com.onegallery.app.domain.MediaItem
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.math.max
+import kotlin.math.roundToInt
 
 /**
  * Replicates Samsung Gallery's CaptureDelegate dual-engine snapshot mechanism:
@@ -32,44 +31,38 @@ class VideoSnapshotManager(
 
     /**
      * Executes the instant snapshot pipeline:
-     * - Grabs the fastest available valid bitmap from TextureView or MediaMetadataRetriever
-     * - Passes bitmap immediately to UI callback (for shutter flash & thumbnail drop badge)
-     * - Commits to MediaStore asynchronously without blocking video playback
+     * - The TextureView frame (when available) only drives the instant UI feedback
+     * - The file that gets saved is always the native-resolution frame; the screen-sized
+     *   TextureView bitmap is used for saving only if the high-res extraction fails
+     * - [onThumbnail] receives a small preview bitmap, never the full-size frame
      */
     suspend fun captureCurrentFrame(
         textureView: TextureView?,
         videoItem: MediaItem,
         currentPositionMs: Long,
-        onInstantBitmap: (Bitmap) -> Unit
-    ): SnapshotResult? = coroutineScope {
+        onThumbnail: (Bitmap) -> Unit
+    ): SnapshotResult? {
         val positionUs = currentPositionMs * 1000L
 
         // Fast path: Immediate TextureView screen bitmap
         val instantBitmap: Bitmap? = textureView?.bitmap
 
         if (instantBitmap != null) {
-            onInstantBitmap(instantBitmap)
+            val thumbnail = withContext(Dispatchers.Default) { instantBitmap.toThumbnail() }
+            withContext(Dispatchers.Main) { onThumbnail(thumbnail) }
         }
 
-        // Parallel task: Try to extract native uncompressed resolution frame
-        val highResDeferred = async(Dispatchers.IO) {
+        // High-res path: native uncompressed resolution frame
+        val highResBitmap = withContext(Dispatchers.IO) {
             extractHighResFrame(videoItem.uri, positionUs)
         }
 
-        // Wait with a short 250ms threshold; if high-res completes, use it; otherwise fallback to instant
-        val highResBitmap = withTimeoutOrNull(300L) {
-            highResDeferred.await()
-        }
+        val finalBitmap = highResBitmap ?: instantBitmap ?: return null
 
-        val finalBitmap = highResBitmap ?: instantBitmap ?: highResDeferred.await()
-
-        if (finalBitmap == null) return@coroutineScope null
-
-        // If high-res wasn't delivered to UI yet and was selected, notify UI
+        // No instant frame was available, so the UI is still waiting for its thumbnail
         if (instantBitmap == null) {
-            withContext(Dispatchers.Main) {
-                onInstantBitmap(finalBitmap)
-            }
+            val thumbnail = withContext(Dispatchers.Default) { finalBitmap.toThumbnail() }
+            withContext(Dispatchers.Main) { onThumbnail(thumbnail) }
         }
 
         // Commit to MediaStore in background
@@ -79,10 +72,22 @@ class VideoSnapshotManager(
             playbackPositionMs = currentPositionMs
         )
 
-        SnapshotResult(
+        return SnapshotResult(
             bitmap = finalBitmap,
             savedUri = savedUri,
             timestampMs = currentPositionMs
+        )
+    }
+
+    private fun Bitmap.toThumbnail(): Bitmap {
+        val longestSide = max(width, height)
+        if (longestSide <= THUMBNAIL_MAX_PX) return this
+        val ratio = THUMBNAIL_MAX_PX.toFloat() / longestSide
+        return Bitmap.createScaledBitmap(
+            this,
+            (width * ratio).roundToInt().coerceAtLeast(1),
+            (height * ratio).roundToInt().coerceAtLeast(1),
+            true
         )
     }
 
@@ -103,5 +108,9 @@ class VideoSnapshotManager(
                 retriever.release()
             } catch (_: Exception) {}
         }
+    }
+
+    private companion object {
+        const val THUMBNAIL_MAX_PX = 256
     }
 }
