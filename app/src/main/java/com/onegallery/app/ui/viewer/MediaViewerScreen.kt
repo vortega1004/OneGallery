@@ -1,6 +1,9 @@
 package com.onegallery.app.ui.viewer
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -64,10 +67,14 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.util.lerp
 import coil3.compose.AsyncImage
 import com.onegallery.app.domain.MediaItem
+import com.onegallery.app.ui.common.rememberFullSizeRequest
+import com.onegallery.app.ui.common.rememberThumbnailRequest
 import com.onegallery.app.ui.filmstrip.FilmStripInfinityViewer
 import com.onegallery.app.ui.video.VideoPlayerView
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -317,6 +324,21 @@ private fun ZoomableImageView(
     var scale by remember { mutableFloatStateOf(1f) }
     var offsetX by remember { mutableFloatStateOf(0f) }
     var offsetY by remember { mutableFloatStateOf(0f) }
+    val zoomScope = rememberCoroutineScope()
+
+    // A page shows the (usually already cached) thumbnail first and only asks for the
+    // full-resolution decode once it has been the active page for a moment. Pages merely passed
+    // while scrubbing the filmstrip, or peeking in during a swipe, never start a 12 MP decode.
+    // Once upgraded a page stays upgraded, so flicking back to it doesn't re-blur.
+    var loadFullRes by remember { mutableStateOf(false) }
+    LaunchedEffect(isActivePage) {
+        if (isActivePage && !loadFullRes) {
+            delay(FULL_RES_DELAY_MS)
+            loadFullRes = true
+        }
+    }
+    val thumbnailRequest = rememberThumbnailRequest(mediaItem.uri)
+    val fullSizeRequest = rememberFullSizeRequest(mediaItem.uri)
 
     // Swiping away from a zoomed photo shouldn't leave it zoomed when the user comes back
     LaunchedEffect(isActivePage) {
@@ -339,9 +361,21 @@ private fun ZoomableImageView(
                 detectTapGestures(
                     onTap = { onTap() },
                     onDoubleTap = {
-                        scale = if (scale > 1.2f) 1f else 2.5f
-                        offsetX = 0f
-                        offsetY = 0f
+                        val startScale = scale
+                        val startX = offsetX
+                        val startY = offsetY
+                        val targetScale = if (scale > 1.2f) 1f else 2.5f
+                        zoomScope.launch {
+                            animate(
+                                initialValue = 0f,
+                                targetValue = 1f,
+                                animationSpec = tween(DOUBLE_TAP_ZOOM_MS, easing = FastOutSlowInEasing)
+                            ) { fraction, _ ->
+                                scale = lerp(startScale, targetScale, fraction)
+                                offsetX = lerp(startX, 0f, fraction)
+                                offsetY = lerp(startY, 0f, fraction)
+                            }
+                        }
                     }
                 )
             }
@@ -404,7 +438,7 @@ private fun ZoomableImageView(
         contentAlignment = Alignment.Center
     ) {
         AsyncImage(
-            model = mediaItem.uri,
+            model = if (loadFullRes) fullSizeRequest else thumbnailRequest,
             contentDescription = mediaItem.displayName,
             contentScale = ContentScale.Fit,
             modifier = Modifier
@@ -418,3 +452,6 @@ private fun ZoomableImageView(
         )
     }
 }
+
+private const val FULL_RES_DELAY_MS = 120L
+private const val DOUBLE_TAP_ZOOM_MS = 220
