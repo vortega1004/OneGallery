@@ -62,8 +62,21 @@ data class Album(
 
 /** Ordering options for the media inside a folder (and the flat Pictures grid). */
 enum class MediaSort(val label: String) {
-    NEWEST_FIRST("Newest first"),
-    OLDEST_FIRST("Oldest first"),
+    /**
+     * Capture time. [MediaItem.dateTaken] already falls back to date-added when a file has no
+     * capture timestamp, so these never leave undated items stranded.
+     */
+    NEWEST_FIRST("Date taken (newest)"),
+    OLDEST_FIRST("Date taken (oldest)"),
+
+    /**
+     * When the file arrived on the device. Differs from capture time for anything downloaded,
+     * transferred or restored from a backup — a photo shot in 2020 and copied over today is
+     * old by date taken and brand new by date added.
+     */
+    ADDED_NEWEST("Date added (newest)"),
+    ADDED_OLDEST("Date added (oldest)"),
+
     NAME_ASC("Name (A–Z)"),
     NAME_DESC("Name (Z–A)"),
     LARGEST("Largest first"),
@@ -84,6 +97,8 @@ enum class MediaSort(val label: String) {
 fun List<MediaItem>.sortedBy(sort: MediaSort): List<MediaItem> = when (sort) {
     MediaSort.NEWEST_FIRST -> sortedByDescending { it.dateTaken }
     MediaSort.OLDEST_FIRST -> sortedBy { it.dateTaken }
+    MediaSort.ADDED_NEWEST -> sortedWith(compareByDescending<MediaItem> { it.dateAdded }.thenByDescending { it.dateTaken })
+    MediaSort.ADDED_OLDEST -> sortedWith(compareBy<MediaItem> { it.dateAdded }.thenByDescending { it.dateTaken })
     MediaSort.NAME_ASC -> sortedWith(compareBy({ it.displayName.lowercase() }, { -it.dateTaken }))
     MediaSort.NAME_DESC -> sortedWith(compareByDescending<MediaItem> { it.displayName.lowercase() }.thenByDescending { it.dateTaken })
     MediaSort.LARGEST -> sortedWith(compareByDescending<MediaItem> { it.size }.thenByDescending { it.dateTaken })

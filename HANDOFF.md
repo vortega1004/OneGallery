@@ -1,6 +1,6 @@
 # OneGallery — Engineering Handoff
 
-**Last verified:** 2026-09-18 at `b2e524d`
+**Last verified:** 2026-09-18 at `a1217e2`
 **Status:** Builds clean. Smoke-tested on the emulator and on a physical Pixel 10 Pro XL
 against a real 3,132-item library. Video frame capture works on real hardware. Two
 performance problems appear only at that scale (§6.15, §6.16). See §1 for exactly what was
@@ -40,7 +40,11 @@ crashes** on either. Anything the emulator's tiny library cannot exercise is cal
 | Filmstrip scrubbing *feel* | **NOT ASSESSED** — subjective, needs a human thumb |
 | `minSdk` 26 → 29 | **NOT TESTABLE HERE** — accepted as a product decision; drops Android 8/9 |
 | Run on physical Pixel | **VERIFIED** — Pixel 10 Pro XL, Android 17 / API 37, 3,132 items (2,451 photos + 681 videos). Video frame capture confirmed working on real hardware. Two performance problems surfaced only at this scale: §6.15, §6.16 |
-| Albums tab | **VERIFIED on emulator** — folder grid, drill-down, viewer scoped to the album, full back chain. Not yet re-tested on the Pixel |
+| Albums tab | **VERIFIED on emulator** — folder grid, drill-down, viewer scoped to the album, full back chain |
+| Grid position restored on exit | **VERIFIED on emulator** — returns to the photo last viewed, even after paging far from the entry point; no jolt when the item is already visible |
+| Sorting (albums + media) | **VERIFIED on emulator** — all options present, orders correct, grid/viewer indices stay aligned after a re-sort, selection survives the viewer. "Date taken" vs "Date added" divergence **NOT verifiable on the emulator**: every test file has a null EXIF capture time, so `dateTaken` falls back to `dateAdded` and the two orders coincide by definition |
+| Thumbnail decoding | **VERIFIED firing** on emulator (fetch path instrumented and counted); **speedup only measurable on real photos** — emulator test images are 480×360, so there is nothing to save. Owner reports stutter "mostly gone" on the Pixel |
+| Launcher icon | **VERIFIED** — adaptive icon renders correctly under the launcher mask |
 | Automated tests | **NONE EXIST** |
 
 The project previously did **not** compile. One Kotlin error and two missing build files
@@ -112,6 +116,15 @@ of the UI state lives in composables and is passed down.
 > `GalleryGridScreen` is discarded the moment a photo is opened. Add new grid-level state in
 > `GalleryApp`, not in the grid.
 >
+> Sorting lives alongside it: `albumSort` orders the folder list, `mediaSort` orders the media
+> inside a folder and on the Pictures grid. The grid and the viewer must build their list with
+> the *same* expression — `mediaItems.forAlbum(id).sortedBy(sort)` — because the viewer opens by
+> index; any disagreement opens a different photo than the one tapped.
+>
+> Changing a sort scrolls back to the top via `scrollToTopAfterReorder()`, which **waits one
+> frame first**. LazyGrid keys are stable, so on a re-order it re-anchors to the previously
+> first-visible item during the measure pass — a plain `scrollToItem(0)` is silently undone.
+>
 > On exit the viewer also reports the item it ended on (`onVisibleItemChange`), and the grid
 > scrolls to it **by id, not index**, so a live MediaStore update that shifts positions cannot
 > send the user to the wrong photo. The scroll is skipped when the item is already visible, so
@@ -132,6 +145,18 @@ app/src/main/java/com/onegallery/app/
     ├── video/VideoSnapshotManager.kt         # Dual-path frame extraction
     └── theme/{Color,Theme}.kt                # One UI palettes
 ```
+
+### Image loading
+
+`OneGalleryApplication` supplies the app-wide Coil `ImageLoader`. `MediaThumbnailFetcher`
+serves small requests (≤512 px) from MediaStore's cached thumbnails via
+`ContentResolver.loadThumbnail` instead of decoding the original; larger requests (the
+fullscreen viewer) fall through to Coil's normal path untouched.
+
+> The fetcher is registered against **`coil3.Uri`, not `android.net.Uri`**. Coil runs mappers
+> before fetchers and `AndroidUriMapper` has already converted the platform Uri by then — a
+> factory declared over `android.net.Uri` is never invoked, silently, with no error. If you add
+> another fetcher, key it the same way.
 
 ### Data flow
 
@@ -271,64 +296,56 @@ and never read from `MediaStore.IS_FAVORITE`.
 **Search is still unimplemented** but now says so on screen instead of silently rendering the
 Pictures grid.
 
-### 6.15 Filmstrip scrubbing stutters on a real library — MEDIUM
+### 6.15 Filmstrip scrubbing — LARGELY FIXED, residual stutter
 
-Reported from the Pixel 10 Pro XL (3,132 items), and still present after the PR #1 sync
-rewrite. Not reproducible on the emulator's 9-item library, so it is a volume problem, not a
-logic one. Likely suspects, in order: every visible thumbnail recomposes as the mirrored
-scroll position changes; Coil decodes full-size images for 44×60 dp thumbnails instead of
-using `MediaStore`'s own thumbnails (`contentResolver.loadThumbnail`); and `scrollToItem` runs
-per frame during pager drags.
+Was: the filmstrip stuttered while scrubbing on a 3,132-item library, and again when backing
+out of the viewer.
 
-### 6.16 Grid is slow to first paint at scale — MEDIUM
+Fixed by `MediaThumbnailFetcher` (see §4) plus a larger Coil memory cache. Owner's verdict
+after testing on the Pixel: **"mostly gone"**. Not closed, because "mostly" is not "gone".
 
-Also from the Pixel: "doesn't populate that fast, but it's not unbearable." The repository
-loads the **entire** library into memory in one query with no pagination
-(`MediaStoreRepository.queryMediaItems`), and every visible cell then decodes a full-resolution
-image. Same thumbnail fix applies; pagination is the larger structural answer.
+If the remainder needs chasing, it is probably **not** decoding any more — the next suspect is
+recomposition: every visible filmstrip thumbnail recomposes as the mirrored scroll position
+updates during a pager drag. That is a different fix from this one. Measure before changing
+anything, and measure on a real library — none of this reproduces on the emulator.
 
-### 6.5 Every video page still builds its own ExoPlayer — LOW (was MEDIUM)
+### 6.16 Grid is slow to first paint at scale — PARTIALLY ADDRESSED
 
-`VideoPlayerView.kt`
-
-Overlapping audio and background playback are fixed (only the settled pager page plays, and
-`ON_STOP` pauses). What remains is cost: each composed video page still creates and
-`prepare()`s its own player, including pages merely passed while scrubbing the filmstrip.
-Consider a single shared player driven by `pagerState.settledPage`.
-
-### 6.9 Grid is hardcoded dark — LOW
-
-`GalleryGridScreen.kt` and throughout. `Theme.kt` defines a complete light color scheme,
-but the grid hardcodes `DarkBackground` and `DarkText*`. Light mode looks half-finished.
-`MainActivity` forces light system-bar icons to match; undo that when this is fixed.
-
-### 6.13 Partial access can't be widened from inside the app — LOW
-
-With "Select photos…" (Android 14+) the gallery shows only the chosen items and offers no
-"select more" entry point. Re-requesting the media permissions re-opens the system picker.
-
-### 6.14 ACTION_VIEW items have synthetic metadata — LOW
-
-`MediaStoreRepository.mediaItemFromUri()` builds a standalone `MediaItem` (id `-1`, no path,
-no dimensions, date = now) for content handed over by other apps, so the details sheet is
-sparse for those. The viewer shows that one item only — no filmstrip neighbours.
-
-### Fixed on 2026-09-18 (unverified — see note above)
-
-| # | Issue | Resolution |
-| --- | --- | --- |
-| 6.1 | Permission dead-end on Android 14/15 | `READ_MEDIA_VISUAL_USER_SELECTED` requested; any media grant (full/partial/images-only) counts; retry + "Open settings" buttons; re-check in `onStart` |
-| 6.2 | Full MediaStore query on the main thread | Observer only signals; conflated + rate-limited query on `Dispatchers.IO`; flow owned by `GalleryViewModel` |
-| 6.6 | Filmstrip drew two overlapping frames | Per-item border removed; the center bracket is the selection marker |
-| 6.7 | Grid pinch-to-zoom rarely triggered | Zoom accumulated across the gesture, handled in the Initial pass so scrolling can't cancel it |
-| 6.8 | `minSdk = 26` but query needed API 29 | `minSdk` raised to 29; pre-Q branches and `WRITE_EXTERNAL_STORAGE` removed |
-| 6.10 | Deprecated icon warning | `Icons.AutoMirrored.Rounded.ArrowBack` |
-| 6.11 | Dead `FilmStripLayoutManager.kt` | Deleted (recover from git history if wanted) along with the `recyclerview` dependency |
-| 6.12 | Viewer crash when the library shrinks | Page index clamped before indexing |
+Owner, on the Pixel: "doesn't populate that fast, but it's not unbearable." Thumbnail decoding
+is now cheap (§4), but the structural half is untouched: `MediaStoreRepository.queryMediaItems`
+still loads the **entire** library into memory on every change, with no pagination. Not
+re-measured since the thumbnail work.
 
 ---
 
 ## 7. Changelog
+
+### 2026-09-18 — thumbnails, sorting, launcher icon
+
+Three pieces of owner-reported work, all now on the Pixel.
+
+**Thumbnail decoding (§6.15, §6.16).** Grid and filmstrip cells were handing Coil the
+full-resolution URI, so a 12 MP JPEG was decoded to fill a 44×60 dp cell. `MediaThumbnailFetcher`
+serves those from MediaStore's cached thumbnails; the memory cache went to 30% of heap (the
+"stutters when backing out" half was re-decoding evicted entries); crossfade off. Owner's
+verdict: stutter **"mostly gone"**.
+
+**Sorting.** Folder list: 8 orderings. Media inside a folder and on the Pictures grid: 10,
+including **date taken vs date added**, which differ for anything downloaded, transferred or
+restored. Both sorts are hoisted into `GalleryApp` so they survive the viewer.
+
+**Launcher icon.** Replaced the framework placeholder with an adaptive icon, monochrome layer
+included.
+
+Two traps found and documented in §4 rather than just fixed: Coil fetchers must be keyed on
+`coil3.Uri` (a factory over `android.net.Uri` is never called, silently), and re-sorting a
+keyed LazyGrid re-anchors to the previously visible item during measure, so scrolling to the
+top has to wait a frame.
+
+Not verified: "date taken" vs "date added" producing *different* orders. Every emulator test
+file has a null EXIF capture time, so `dateTaken` falls back to `dateAdded` and the two
+coincide there. Real photos will diverge; I tried fabricating EXIF and MediaStore on the
+emulator would not index it.
 
 ### 2026-09-18 — grid position survives the viewer
 
@@ -468,13 +485,11 @@ Still unexercised on-device: the viewer, filmstrip sync, and video frame capture
 
 Roughly dependency-ordered. Good first tasks are marked ★.
 
-1. ★ **Thumbnail decoding** — the single highest-value fix, and the likely root of *both*
-   §6.15 and §6.16. Grid and filmstrip cells feed Coil the full-resolution image URI, so a
-   12 MP JPEG is decoded to fill a 44×60 dp thumbnail. Use `contentResolver.loadThumbnail`
-   (API 29+, which `minSdk` now guarantees) or an explicit Coil `size()`. Measure on the
-   3k-item Pixel, not the emulator — neither problem reproduces at 9 items.
-2. ★ **Paginate the library load** (§6.16). `queryMediaItems` pulls all 3,132 rows into memory
-   on every change. Paging or a windowed query is the structural answer.
+1. ★ **Paginate the library load** (§6.16). `queryMediaItems` pulls all 3,132 rows into memory
+   on every change. Now the largest remaining structural problem — thumbnail decoding is done.
+2. **Chase the residual filmstrip stutter** (§6.15) *only if it still bothers you*. Decoding is
+   no longer the bottleneck; the next suspect is per-frame recomposition of visible thumbnails
+   during a pager drag. Measure on a real library before changing anything.
 3. **Cover the gaps automation couldn't reach** (see §1): `ACTION_VIEW`, grid pinch-to-zoom,
    zoom/pan clamping at image edges, and Albums on the Pixel. These need a human thumb.
 4. Restore the real TextureView capture path (§6.3).
