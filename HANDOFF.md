@@ -554,7 +554,12 @@ then §5 steps 13–22 on the Pixel. **Adds `junit:4.13.2` — first build needs
    reflow, animated double-tap zoom, thumbnail placeholder → full-res crossfade with the
    full decode deferred until a page is active (§6.15, unmeasured). Also fixes folders opening
    at the previous folder's scroll offset (one `LazyGridState` serves every album).
-6. **One-handed ghost video controls + frame-accurate stepping** (owner request after using
+5. `ea5d63a` **Basic photo editor** (§4, §6.4) plus the project's first unit tests. The
+   transform reduction was checked against a brute-force pixel model before commit — the same
+   model is `PhotoEditStateTest`. `MediaStoreRepository`'s insert/pending/EXIF/publish/cleanup
+   sequence became one helper (`insertJpeg`) shared with frame capture: **re-verify capture.**
+
+6. `cb74809` **One-handed ghost video controls + frame-accurate stepping** (owner request after using
    the Pixel one-handed). Shutter moved from top-left to the lower-right corner; the centre
    play button is gone and play/pause sits at the left end of the seek bar; new previous /
    next-frame buttons (hold to repeat) and a jog strip where drag distance maps to *frames*
@@ -563,10 +568,6 @@ then §5 steps 13–22 on the Pixel. **Adds `junit:4.13.2` — first build needs
    shows the first frame at-or-after the position, so rounding up lands one frame late; checked
    against a model at 24–240 fps (`FrameStepTest`). Assumes constant frame rate; on
    variable-rate phone footage a step can occasionally be 0 or 2 frames.
-5. `ea5d63a` **Basic photo editor** (§4, §6.4) plus the project's first unit tests. The
-   transform reduction was checked against a brute-force pixel model before commit — the same
-   model is `PhotoEditStateTest`. `MediaStoreRepository`'s insert/pending/EXIF/publish/cleanup
-   sequence became one helper (`insertJpeg`) shared with frame capture: **re-verify capture.**
 
 Known risks, in the order I would expect them to bite: a wrong import or signature somewhere
 in ~1,500 new lines; `Icons.Rounded.RotateLeft/RotateRight/VolumeUp/VolumeOff` may emit
