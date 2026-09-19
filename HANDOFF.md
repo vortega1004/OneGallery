@@ -1,9 +1,8 @@
 # OneGallery — Engineering Handoff
 
-**Last verified:** 2026-09-18 at `3b38155`
-**Unverified on top of that:** the `viewer-features` branch (§7, first entry) — five commits
-written on a machine with **no JDK / Android SDK: never compiled, never run.** Everything in §1
-describes `3b38155`, not that branch.
+**Last verified:** 2026-09-18 — `viewer-features` (PR #2) built and tested by the owner before
+merge. The itemised rows in §1 were measured at `3b38155`; PR #2's result is owner-reported as
+a whole (see its row) rather than step by step.
 **Status:** Builds clean. Smoke-tested on the emulator and on a physical Pixel 10 Pro XL
 against a real 3,132-item library. Video frame capture works on real hardware. Two
 performance problems appear only at that scale (§6.15, §6.16). See §1 for exactly what was
@@ -53,8 +52,8 @@ crashes** on either. Anything the emulator's tiny library cannot exercise is cal
 | Sorting (albums + media) | **VERIFIED on emulator** — all options present, orders correct, grid/viewer indices stay aligned after a re-sort, selection survives the viewer. "Date taken" vs "Date added" divergence **NOT verifiable on the emulator**: every test file has a null EXIF capture time, so `dateTaken` falls back to `dateAdded` and the two orders coincide by definition |
 | Thumbnail decoding | **VERIFIED firing** on emulator (fetch path instrumented and counted); **speedup only measurable on real photos** — emulator test images are 480×360, so there is nothing to save. Owner reports stutter "mostly gone" on the Pixel |
 | Launcher icon | **VERIFIED** — adaptive icon renders correctly under the launcher mask |
-| Automated tests | `3b38155`: none. `viewer-features` adds the first JVM unit tests (`gradlew test`) — **never run** |
-| `viewer-features` branch | **NOT COMPILED, NOT RUN.** Swipe-up details + EXIF, default-muted video, photo editor, transitions, review fixes. It touches VERIFIED behaviour and needs re-checking: frame capture (save path refactored into `insertJpeg`), video autoplay (now delayed 150 ms + deferred `prepare()`), grid pinch, grid↔viewer switching (now `AnimatedContent`), album drill-down, grid position restore |
+| Automated tests | First JVM unit tests added in PR #2 (`gradlew.bat test`): `PhotoEditStateTest`, `FrameStepTest`, `ExifDetailsTest`. Pure logic only — nothing covers the UI, MediaStore or playback |
+| `viewer-features` (PR #2) | **BUILT AND TESTED by the owner** before merge (2026-09-18): "everything is fine". Covers swipe-up details + EXIF, default-muted video, photo editor, transitions, one-handed ghost video controls + frame stepping, and the review fixes. **Owner-reported, not itemised**: the device, warning count and per-step results of §5 steps 13–24 were not relayed to the agent that wrote this row — whoever ran them, please replace this row with the specifics, in the style of the rows above |
 
 The project previously did **not** compile. One Kotlin error and two missing build files
 were fixed on 2026-09-18 — see §7 for the changelog.
@@ -311,7 +310,7 @@ Manual smoke test, in order:
     does not depend on the MediaStore scope.
 12. Delete a file from another app while the viewer is open → no crash.
 
-Added by the `viewer-features` branch (none of it has ever run):
+Added by PR #2 (`viewer-features`):
 
 13. Open a video → **silent**. Tap the speaker at the end of the seek bar → sound. Swipe to
     another video → still unmuted. Back out and reopen → muted again.
@@ -417,8 +416,8 @@ frame.
 `MediaViewerScreen.kt` (action bar)
 
 Share, Favorite, Delete and More are empty lambdas. `isFavorite` is hardcoded `false` and never
-read from `MediaStore.IS_FAVORITE`. **Edit is implemented on `viewer-features`** (unverified):
-stills only, saves a copy. Not covered: video trim, GIFs, overwrite-original, free rotation /
+read from `MediaStore.IS_FAVORITE`. **Edit is implemented** (PR #2): stills only, saves a
+copy. Not covered: video trim, GIFs, overwrite-original, free rotation /
 straighten, aspect-*locked* crop dragging (presets only place the rectangle), and Ultra HDR
 gain maps (the saved copy is SDR).
 
@@ -434,12 +433,13 @@ out of the viewer.
 Fixed by `MediaThumbnailFetcher` (see §4) plus a larger Coil memory cache. Owner's verdict
 after testing on the Pixel: **"mostly gone"**. Not closed, because "mostly" is not "gone".
 
-`viewer-features` adds an **unmeasured** candidate fix for the remainder: scrubbing drives the
+PR #2 adds an **unmeasured** candidate fix for the remainder: scrubbing drives the
 pager with `scrollToPage`, so every page passed was composed and immediately started a
 *full-resolution* decode (photos) or a `prepare()` + autoplay (videos). Photo pages now load a
 thumbnail until they have been active for 120 ms, and video pages wait 150 ms before preparing.
-Written blind on a machine that cannot run the app — per §5a it counts for nothing until it is
-measured on the Pixel, and it is its own commit (`9e2c182` / `33b168c`) so it can be reverted
+It builds and runs, but was written on a machine that cannot run the app and nobody has
+reported before/after numbers — per §5a it counts for nothing until it is measured on the
+Pixel, and it is its own commit (`9e2c182` / `33b168c`) so it can be reverted
 alone.
 
 If the remainder needs chasing, it is probably **not** decoding any more — the next suspect is
@@ -459,7 +459,7 @@ re-measured since the thumbnail work.
 `VideoPlayerView.kt`
 
 Overlapping audio and background playback are fixed (only the settled pager page plays, and
-`ON_STOP` pauses). On `viewer-features` (unverified) `prepare()` is deferred until a page has
+`ON_STOP` pauses). Since PR #2 `prepare()` is deferred until a page has
 been active for 150 ms, so pages merely passed while scrubbing no longer spin up a decoder —
 but each composed video page still *constructs* an ExoPlayer. A single shared player driven by
 `pagerState.settledPage` remains the real fix.
@@ -537,11 +537,16 @@ Changing either of these back will break things silently, with no error:
 
 ## 7. Changelog
 
-### 2026-09-18 — `viewer-features` branch (**NOT COMPILED, NOT RUN**)
+### 2026-09-18 — `viewer-features` branch, PR #2 (written blind, since built and tested)
 
-Written on a machine with no JDK / Android SDK, as one commit per concern so a build failure
-or a regression can be bisected. First job: `gradlew.bat assembleDebug`, `gradlew.bat test`,
-then §5 steps 13–22 on the Pixel. **Adds `junit:4.13.2` — first build needs network.**
+Written on a machine with no JDK / Android SDK, as one commit per concern so a regression can
+be bisected — hence the "(NOT COMPILED)" in those commit subjects, which was true when they
+were written. The owner then built and tested the branch and reported **"everything is fine"**
+before merging. Adds `junit:4.13.2`.
+
+What that report does *not* settle, because it was not itemised: whether the 120 ms deferred
+full-resolution load actually reduced the filmstrip stutter (§6.15 — a perf claim still needs
+before/after numbers per §5a), and how frame stepping behaves on variable-frame-rate footage.
 
 1. `33b168c` **Review fixes.** Grid pinch restarted itself on the first column step (§6a).
    Filmstrip scrubbing started every video it passed; activation now waits 150 ms and
@@ -569,12 +574,15 @@ then §5 steps 13–22 on the Pixel. **Adds `junit:4.13.2` — first build needs
    against a model at 24–240 fps (`FrameStepTest`). Assumes constant frame rate; on
    variable-rate phone footage a step can occasionally be 0 or 2 frames.
 
-Known risks, in the order I would expect them to bite: a wrong import or signature somewhere
-in ~1,500 new lines; `Icons.Rounded.RotateLeft/RotateRight/VolumeUp/VolumeOff` may emit
-deprecation warnings — the plain variants were chosen blind because they are guaranteed to
-exist; switch to `Icons.AutoMirrored.Rounded.*` if the compiler says so; `animateItem()` interacting with
-`scrollToTopAfterReorder()` on a re-sort; the swipe-up detector being too eager or too shy
-(tune `triggerDistancePx` / the 2:1 verticality test in `SwipeUpGesture.kt`).
+Things a "works fine" pass may not have exercised:
+
+- `Icons.Rounded.RotateLeft / RotateRight / VolumeUp / VolumeOff` may emit deprecation warnings.
+  The plain variants were chosen blind because they are guaranteed to exist; switch to
+  `Icons.AutoMirrored.Rounded.*` if the compiler says so.
+- `animateItem()` interacting with `scrollToTopAfterReorder()` on a re-sort.
+- The swipe-up detector being too eager or too shy — tune `triggerDistancePx` / the 2:1
+  verticality test in `SwipeUpGesture.kt`.
+- Backward frame steps re-decode from the previous keyframe and may lag on 4K footage.
 
 ### 2026-09-18 — thumbnails, sorting, launcher icon
 
@@ -741,8 +749,10 @@ Still unexercised on-device: the viewer, filmstrip sync, and video frame capture
 
 Roughly dependency-ordered. Good first tasks are marked ★.
 
-0. ★ **Build, test and walk §5 steps 13–22 for the `viewer-features` branch.** It has never
-   been compiled. Then measure the scrub change on the Pixel (§5a) and either keep or revert it.
+0. ★ **Itemise PR #2's test results in §1** (device, warnings, which of §5 steps 13–24 were
+   walked), and **measure the scrub change on the Pixel** (§5a, §6.15) — keep it or revert it
+   on numbers. Tune the one-handed control constants (`GhostVideoControls.kt`,
+   `SwipeUpGesture.kt`) if reach or sensitivity is off.
 1. ★ **Paginate the library load** (§6.16). `queryMediaItems` pulls all 3,132 rows into memory
    on every change. Now the largest remaining structural problem — thumbnail decoding is done.
 2. **Chase the residual filmstrip stutter** (§6.15) *only if it still bothers you*. Decoding is
