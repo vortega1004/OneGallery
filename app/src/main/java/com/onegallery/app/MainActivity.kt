@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -172,8 +173,20 @@ fun GalleryApp(viewModel: GalleryViewModel) {
     var openedAlbumId by rememberSaveable { mutableStateOf<String?>(null) }
     var columnCount by rememberSaveable { mutableIntStateOf(3) }
 
+    // Grid scroll positions live here for the same reason as the state above: the grid is
+    // disposed while the viewer is open, so a state remembered inside it would reset to the
+    // top of the library every time the user opened a photo.
+    val picturesGridState = rememberLazyGridState()
+    val albumGridState = rememberLazyGridState()
+
     // Which album the viewer was opened from; null means the flat Pictures grid.
     var viewerAlbumId by rememberSaveable { mutableStateOf<String?>(null) }
+
+    // The item currently shown in the viewer, and the one the grid should return to on exit.
+    // Tracked by id, not index, so a live MediaStore update that shifts positions cannot send
+    // the grid to the wrong photo.
+    var viewerVisibleItemId by rememberSaveable { mutableStateOf<Long?>(null) }
+    var restoreToItemId by rememberSaveable { mutableStateOf<Long?>(null) }
 
     // Scope the pager to the set the user was actually looking at, so swiping inside an album
     // stays inside that album. Kept as a bucket id rather than a list so it survives process
@@ -183,8 +196,12 @@ fun GalleryApp(viewModel: GalleryViewModel) {
     }
 
     val closeViewer = {
+        // Hand the grid the photo the user actually ended on, which may be far from the one
+        // they opened if they paged or scrubbed the filmstrip.
+        restoreToItemId = viewerVisibleItemId
         selectedItemIndex = -1
         viewerAlbumId = null
+        viewerVisibleItemId = null
     }
 
     // System back / back gesture returns to the grid instead of leaving the app
@@ -194,7 +211,8 @@ fun GalleryApp(viewModel: GalleryViewModel) {
         MediaViewerScreen(
             mediaItems = viewerItems,
             initialIndex = selectedItemIndex,
-            onBack = closeViewer
+            onBack = closeViewer,
+            onVisibleItemChange = { viewerVisibleItemId = it }
         )
     } else {
         GalleryGridScreen(
@@ -205,6 +223,10 @@ fun GalleryApp(viewModel: GalleryViewModel) {
             onOpenAlbum = { openedAlbumId = it },
             columnCount = columnCount,
             onColumnCountChange = { columnCount = it },
+            picturesGridState = picturesGridState,
+            albumGridState = albumGridState,
+            restoreToItemId = restoreToItemId,
+            onRestoreHandled = { restoreToItemId = null },
             onItemClick = { albumId, index ->
                 viewerAlbumId = albumId
                 selectedItemIndex = index

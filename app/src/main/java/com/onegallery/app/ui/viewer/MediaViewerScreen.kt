@@ -75,11 +75,17 @@ import kotlin.math.abs
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
+/**
+ * @param onVisibleItemChange reports the id of the item currently on screen, so the caller can
+ *   restore the grid to it on exit. Reported continuously rather than on back, because back can
+ *   arrive as a gesture, a system key or the toolbar button.
+ */
 fun MediaViewerScreen(
     mediaItems: List<MediaItem>,
     initialIndex: Int,
     onBack: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onVisibleItemChange: (Long) -> Unit = {}
 ) {
     if (mediaItems.isEmpty()) return
 
@@ -96,6 +102,10 @@ fun MediaViewerScreen(
     // (file deleted elsewhere) currentPage can briefly point past the end of the new list.
     val currentPage = pagerState.currentPage.coerceIn(0, mediaItems.lastIndex)
     val currentItem = mediaItems[currentPage]
+
+    // Keep the caller told which item is showing, so backing out can land the grid here even
+    // if the user paged or scrubbed far from where they entered.
+    LaunchedEffect(currentItem.id) { onVisibleItemChange(currentItem.id) }
 
     // Measured overlay heights, handed to the video page so its controls sit clear of the bars
     val density = LocalDensity.current

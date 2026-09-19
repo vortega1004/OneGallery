@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.itemsIndexed
@@ -37,6 +38,7 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -84,6 +86,10 @@ fun GalleryGridScreen(
     onOpenAlbum: (String?) -> Unit,
     columnCount: Int,
     onColumnCountChange: (Int) -> Unit,
+    picturesGridState: LazyGridState,
+    albumGridState: LazyGridState,
+    restoreToItemId: Long?,
+    onRestoreHandled: () -> Unit,
     onItemClick: (albumId: String?, index: Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -151,6 +157,9 @@ fun GalleryGridScreen(
                         mediaItems = albumItems,
                         columnCount = columnCount,
                         onColumnCountChange = onColumnCountChange,
+                        gridState = albumGridState,
+                        restoreToItemId = restoreToItemId,
+                        onRestoreHandled = onRestoreHandled,
                         onItemClick = { index -> onItemClick(openedAlbum.id, index) }
                     )
                 }
@@ -177,6 +186,9 @@ fun GalleryGridScreen(
                         mediaItems = mediaItems,
                         columnCount = columnCount,
                         onColumnCountChange = onColumnCountChange,
+                        gridState = picturesGridState,
+                        restoreToItemId = restoreToItemId,
+                        onRestoreHandled = onRestoreHandled,
                         onItemClick = { index -> onItemClick(null, index) }
                     )
                 }
@@ -288,6 +300,9 @@ private fun MediaGrid(
     mediaItems: List<MediaItem>,
     columnCount: Int,
     onColumnCountChange: (Int) -> Unit,
+    gridState: LazyGridState,
+    restoreToItemId: Long?,
+    onRestoreHandled: () -> Unit,
     onItemClick: (Int) -> Unit
 ) {
     if (mediaItems.isEmpty()) {
@@ -295,7 +310,22 @@ private fun MediaGrid(
         return
     }
 
+    // Returning from the viewer: put the item the user was looking at back on screen. Only
+    // scrolls when it is actually off-screen, so simply backing out of a photo you can still
+    // see leaves the scroll position untouched rather than jolting it.
+    LaunchedEffect(restoreToItemId, mediaItems, columnCount) {
+        val targetId = restoreToItemId ?: return@LaunchedEffect
+        val index = mediaItems.indexOfFirst { it.id == targetId }
+        if (index >= 0 && gridState.layoutInfo.visibleItemsInfo.none { it.index == index }) {
+            // Land a couple of rows above the item so it has context instead of being pinned
+            // under the header.
+            gridState.scrollToItem((index - columnCount * 2).coerceAtLeast(0))
+        }
+        onRestoreHandled()
+    }
+
     LazyVerticalGrid(
+        state = gridState,
         columns = GridCells.Fixed(columnCount),
         contentPadding = PaddingValues(2.dp),
         horizontalArrangement = Arrangement.spacedBy(2.dp),

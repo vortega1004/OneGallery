@@ -107,9 +107,15 @@ Single-module app, MVI-ish, no DI framework. `GalleryViewModel` owns the media l
 of the UI state lives in composables and is passed down.
 
 > **Grid browsing state is hoisted into `GalleryApp` on purpose** — selected tab, opened
-> album, column count. The viewer *replaces* the grid in the composition rather than stacking
-> on top of it, so `rememberSaveable` state owned by `GalleryGridScreen` is discarded the
-> moment a photo is opened. Add new grid-level state in `GalleryApp`, not in the grid.
+> album, column count, **and both `LazyGridState`s**. The viewer *replaces* the grid in the
+> composition rather than stacking on top of it, so `rememberSaveable` state owned by
+> `GalleryGridScreen` is discarded the moment a photo is opened. Add new grid-level state in
+> `GalleryApp`, not in the grid.
+>
+> On exit the viewer also reports the item it ended on (`onVisibleItemChange`), and the grid
+> scrolls to it **by id, not index**, so a live MediaStore update that shifts positions cannot
+> send the user to the wrong photo. The scroll is skipped when the item is already visible, so
+> simply backing out of a photo you can still see does not jolt the list.
 
 ```
 app/src/main/java/com/onegallery/app/
@@ -323,6 +329,22 @@ sparse for those. The viewer shows that one item only — no filmstrip neighbour
 ---
 
 ## 7. Changelog
+
+### 2026-09-18 — grid position survives the viewer
+
+Owner-reported from the Pixel: scrolling deep into a library, opening a photo and backing out
+dumped you at the very top. At 3,132 items that is a workflow killer.
+
+Two parts, same root cause as the album-navigation bug: the grid's `LazyGridState` lived
+inside a composable the viewer destroys. Both grid states are now hoisted into `GalleryApp`,
+and the viewer reports the item it ended on so the grid returns *to that photo* rather than
+merely to the old offset — which matters because the user may have paged or scrubbed the
+filmstrip a long way from where they entered.
+
+Verified on the emulator with a 69-item library: scrolled deep, opened an image, paged well
+past it, backed out, and landed on the image last viewed (confirmed against the grid's actual
+top, which was elsewhere). Opening a photo and backing straight out leaves the scroll offset
+untouched.
 
 ### 2026-09-18 — first physical-device run, and a working Albums tab
 
