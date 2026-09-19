@@ -47,6 +47,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -378,6 +379,9 @@ private fun MediaGrid(
         onRestoreHandled()
     }
 
+    val latestColumnCount by rememberUpdatedState(columnCount)
+    val latestOnColumnCountChange by rememberUpdatedState(onColumnCountChange)
+
     LazyVerticalGrid(
         state = gridState,
         columns = GridCells.Fixed(columnCount),
@@ -386,10 +390,15 @@ private fun MediaGrid(
         verticalArrangement = Arrangement.spacedBy(2.dp),
         modifier = Modifier
             .fillMaxSize()
-            .pointerInput(columnCount) {
+            .pointerInput(Unit) {
                 // Runs in the Initial pass so a two-finger pinch is claimed before the grid's
                 // own scrolling sees (and consumes) it. Zoom deltas arrive per event (each
                 // ~1.0), so they are accumulated across the gesture.
+                //
+                // Keyed on Unit, reading the column count through rememberUpdatedState: keying
+                // on columnCount restarted this block on the first step of a pinch, and the
+                // restarted block waits for a fresh finger-down — so the rest of that pinch
+                // was no longer consumed and leaked into the grid as a two-finger scroll.
                 awaitEachGesture {
                     var cumulativeZoom = 1f
                     awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
@@ -398,10 +407,10 @@ private fun MediaGrid(
                         if (event.changes.count { it.pressed } >= 2) {
                             cumulativeZoom *= event.calculateZoom()
                             if (cumulativeZoom > 1.25f) {
-                                if (columnCount > 1) onColumnCountChange(columnCount - 1)
+                                if (latestColumnCount > 1) latestOnColumnCountChange(latestColumnCount - 1)
                                 cumulativeZoom = 1f
                             } else if (cumulativeZoom < 0.8f) {
-                                if (columnCount < 5) onColumnCountChange(columnCount + 1)
+                                if (latestColumnCount < 5) latestOnColumnCountChange(latestColumnCount + 1)
                                 cumulativeZoom = 1f
                             }
                             event.changes.forEach {

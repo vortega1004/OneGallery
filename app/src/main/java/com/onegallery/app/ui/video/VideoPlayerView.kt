@@ -67,6 +67,8 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
+import coil3.compose.AsyncImage
+import com.onegallery.app.ui.common.rememberThumbnailRequest
 import com.onegallery.app.data.MediaStoreRepository
 import com.onegallery.app.domain.MediaItem
 import com.onegallery.app.ui.theme.OneUIBlue
@@ -107,6 +109,8 @@ fun VideoPlayerView(
     // Non-null while the user drags the scrubber, so the thumb follows the finger, not the ticker
     var seekPositionMs by remember { mutableStateOf<Float?>(null) }
     var resumeOnStart by remember { mutableStateOf(false) }
+    // The SurfaceView is black until the decoder delivers a frame; a poster covers that gap
+    var firstFrameRendered by remember(mediaItem.uri) { mutableStateOf(false) }
 
     // Flash & thumbnail drop state
     val flashAlpha = remember { Animatable(0f) }
@@ -119,7 +123,9 @@ fun VideoPlayerView(
     val exoPlayer = remember(mediaItem.uri) {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(ExoMediaItem.fromUri(mediaItem.uri))
-            prepare()
+            // prepare() is deferred until this page is the active one (see below). Scrubbing the
+            // filmstrip composes every video page it passes; preparing each of them spun up a
+            // decoder per page for nothing.
             playWhenReady = false
             repeatMode = Player.REPEAT_MODE_ONE
             addListener(object : Player.Listener {
@@ -132,13 +138,25 @@ fun VideoPlayerView(
                         durationMs = duration
                     }
                 }
+
+                override fun onRenderedFirstFrame() {
+                    firstFrameRendered = true
+                }
             })
         }
     }
 
-    // Only the settled pager page plays; neighbours composed during a swipe stay paused
+    // Only the settled pager page plays; neighbours composed during a swipe stay paused.
+    // The short wait matters while scrubbing the filmstrip: every page it passes is "settled"
+    // for a frame or two, and without the wait each video on the way would start playing.
     LaunchedEffect(exoPlayer, isActivePage) {
-        if (isActivePage) exoPlayer.play() else exoPlayer.pause()
+        if (isActivePage) {
+            delay(ACTIVATION_DELAY_MS)
+            if (exoPlayer.playbackState == Player.STATE_IDLE) exoPlayer.prepare()
+            exoPlayer.play()
+        } else {
+            exoPlayer.pause()
+        }
     }
 
     // Never keep playing (or looping audio) from the background
@@ -215,6 +233,17 @@ fun VideoPlayerView(
             },
             modifier = Modifier.fillMaxSize()
         )
+
+        // Poster frame until the first decoded frame is on screen. Thumbnail-sized, so it is
+        // served from MediaStore's cache (usually already in memory from the grid/filmstrip).
+        if (!firstFrameRendered) {
+            AsyncImage(
+                model = rememberThumbnailRequest(mediaItem.uri),
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
 
         // Shutter White Flash Overlay
         Box(
@@ -395,6 +424,8 @@ fun VideoPlayerView(
         }
     }
 }
+
+private const val ACTIVATION_DELAY_MS = 150L
 
 private fun formatMs(ms: Long): String {
     val totalSeconds = (ms / 1000).coerceAtLeast(0)

@@ -73,13 +73,13 @@ import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
 
-@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
-@Composable
 /**
  * @param onVisibleItemChange reports the id of the item currently on screen, so the caller can
  *   restore the grid to it on exit. Reported continuously rather than on back, because back can
  *   arrive as a gesture, a system key or the toolbar button.
  */
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
+@Composable
 fun MediaViewerScreen(
     mediaItems: List<MediaItem>,
     initialIndex: Int,
