@@ -28,8 +28,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.VolumeOff
-import androidx.compose.material.icons.automirrored.rounded.VolumeUp
+import androidx.compose.material.icons.rounded.VolumeOff
+import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Camera
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -441,9 +441,9 @@ fun VideoPlayerView(
                 ) {
                     Icon(
                         imageVector = if (isMuted) {
-                            Icons.AutoMirrored.Rounded.VolumeOff
+                            Icons.Rounded.VolumeOff
                         } else {
-                            Icons.AutoMirrored.Rounded.VolumeUp
+                            Icons.Rounded.VolumeUp
                         },
                         contentDescription = if (isMuted) "Unmute" else "Mute",
                         tint = Color.White,

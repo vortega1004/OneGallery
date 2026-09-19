@@ -1,6 +1,9 @@
 # OneGallery — Engineering Handoff
 
 **Last verified:** 2026-09-18 at `3b38155`
+**Unverified on top of that:** the `viewer-features` branch (§7, first entry) — five commits
+written on a machine with **no JDK / Android SDK: never compiled, never run.** Everything in §1
+describes `3b38155`, not that branch.
 **Status:** Builds clean. Smoke-tested on the emulator and on a physical Pixel 10 Pro XL
 against a real 3,132-item library. Video frame capture works on real hardware. Two
 performance problems appear only at that scale (§6.15, §6.16). See §1 for exactly what was
@@ -50,7 +53,8 @@ crashes** on either. Anything the emulator's tiny library cannot exercise is cal
 | Sorting (albums + media) | **VERIFIED on emulator** — all options present, orders correct, grid/viewer indices stay aligned after a re-sort, selection survives the viewer. "Date taken" vs "Date added" divergence **NOT verifiable on the emulator**: every test file has a null EXIF capture time, so `dateTaken` falls back to `dateAdded` and the two orders coincide by definition |
 | Thumbnail decoding | **VERIFIED firing** on emulator (fetch path instrumented and counted); **speedup only measurable on real photos** — emulator test images are 480×360, so there is nothing to save. Owner reports stutter "mostly gone" on the Pixel |
 | Launcher icon | **VERIFIED** — adaptive icon renders correctly under the launcher mask |
-| Automated tests | **NONE EXIST** |
+| Automated tests | `3b38155`: none. `viewer-features` adds the first JVM unit tests (`gradlew test`) — **never run** |
+| `viewer-features` branch | **NOT COMPILED, NOT RUN.** Swipe-up details + EXIF, default-muted video, photo editor, transitions, review fixes. It touches VERIFIED behaviour and needs re-checking: frame capture (save path refactored into `insertJpeg`), video autoplay (now delayed 150 ms + deferred `prepare()`), grid pinch, grid↔viewer switching (now `AnimatedContent`), album drill-down, grid position restore |
 
 The project previously did **not** compile. One Kotlin error and two missing build files
 were fixed on 2026-09-18 — see §7 for the changelog.
@@ -148,9 +152,15 @@ app/src/main/
     │   └── MediaThumbnailFetcher.kt  # Coil fetcher: MediaStore thumbnails for small requests
     ├── domain/MediaItem.kt       # Models, toAlbums(), AlbumSort/MediaSort + their sorts
     └── ui/
+        ├── common/MediaImageRequests.kt          # Coil requests: thumbnail stand-in, full-size + placeholder
         ├── grid/GalleryGridScreen.kt             # Grid, Albums folders, sort menus, bottom nav
-        ├── viewer/MediaViewerScreen.kt           # HorizontalPager + zoomable image + overlays
-        ├── viewer/MediaDetailsSheet.kt           # ModalBottomSheet with EXIF-ish details
+        ├── viewer/MediaViewerScreen.kt           # HorizontalPager + zoomable image + overlays + editor overlay
+        ├── viewer/MediaDetailsSheet.kt           # ModalBottomSheet: MediaStore fields + async EXIF
+        ├── viewer/ExifDetails.kt                 # EXIF reader (camera, exposure, GPS) for the sheet
+        ├── viewer/SwipeUpGesture.kt              # Non-consuming swipe-up detector (opens the sheet)
+        ├── editor/PhotoEditState.kt              # Pure edit state + transform/crop/colour math (unit-tested)
+        ├── editor/PhotoEditRenderer.kt           # Decode / orient / crop / colour -> Bitmap
+        ├── editor/PhotoEditorScreen.kt           # Editor UI: crop & rotate, adjust, save copy
         ├── filmstrip/FilmStripInfinityViewer.kt  # Compose filmstrip, 1:1 synced with the pager
         ├── video/VideoPlayerView.kt              # Media3 PlayerView + capture shutter UI
         ├── video/VideoSnapshotManager.kt         # Dual-path frame extraction
@@ -187,6 +197,38 @@ pager with `scrollToPage`.
 **Viewer overlays:** `MediaViewerScreen.isOverlayVisible` is the single visibility state for
 the top bar, the filmstrip/action bar **and** the video controls. The overlay heights are
 measured and passed to `VideoPlayerView` as `controlsPadding` so nothing overlaps.
+
+**Viewer gestures (all on one page, none may starve the others):** the pager owns horizontal
+drags; `ZoomableImageView`'s loop consumes only when it really zooms/pans; `swipeUpToReveal`
+*never* consumes and backs off if a child consumed or a second finger lands. Swipe-up is
+disabled while a photo is zoomed — via `rememberUpdatedState`, **not** by adding/removing the
+modifier, because changing the modifier chain mid-pinch can restart the sibling `pointerInput`
+blocks and drop the gesture.
+
+**Viewer image loading:** a photo page requests a thumbnail-sized image first (served by
+`MediaThumbnailFetcher`, usually already in the memory cache from the grid) and upgrades to the
+full-resolution request after it has been the *active* page for 120 ms. The full request uses
+`placeholderMemoryCacheKey(uri.toString())` so the thumbnail stays up while it decodes. This
+assumes Coil keys un-transformed requests by `uri.toString()`; if that is wrong the only effect
+is no placeholder. **Unmeasured** — see §6.15.
+
+**Video:** starts muted (`isVideoMuted` lives in `MediaViewerScreen`, so unmuting carries to the
+next video; reopening the viewer re-mutes). A page only `prepare()`s and plays after being the
+active page for 150 ms, because filmstrip scrubbing makes every passed page "settled" for a
+frame. A thumbnail poster covers the SurfaceView until `onRenderedFirstFrame`.
+
+**Photo editor:** an overlay inside `MediaViewerScreen`, not a destination. Geometry is one
+canonical transform — *flip horizontally, then rotate clockwise* — however the buttons were
+pressed (`PhotoEditState.flipHorizontally()` folds a new flip in with H·R(θ) = R(−θ)·H). The crop
+rect is normalized and lives in post-transform space, so preview and save share it. Preview:
+1600 px bitmap + draw-time colour filter. Save: decode ≤4096 px → `PhotoEditRenderer.render` →
+`MediaStoreRepository.saveEditedImage` → `Pictures/OneGallery_Edits`, always a **copy**.
+
+**Transitions:** `GalleryApp` swaps grid/viewer inside `AnimatedContent` (the viewer still
+*replaces* the grid — state stays hoisted). `closeViewer` must **not** clear `viewerAlbumId`: the
+viewer stays composed while animating out and would swap its list mid-fade. Inside the grid, a
+second `AnimatedContent` is keyed by `GridDestination.key`; album items are built from the
+*destination's* album for the same reason. Grid cells use `animateItem()`.
 
 ### Intentional design notes
 
@@ -268,6 +310,32 @@ Manual smoke test, in order:
     does not depend on the MediaStore scope.
 12. Delete a file from another app while the viewer is open → no crash.
 
+Added by the `viewer-features` branch (none of it has ever run):
+
+13. Open a video → **silent**. Tap the speaker at the end of the seek bar → sound. Swipe to
+    another video → still unmuted. Back out and reopen → muted again.
+14. Scrub the filmstrip across several videos → none of them starts playing on the way past;
+    the one you stop on starts after a beat, showing a poster frame (not black) until then.
+15. Swipe **up** on a photo and on a video → details sheet opens. A sloppy diagonal page-swipe
+    must *not* open it. Zoom into a photo and drag vertically → pans, no sheet. The sheet shows
+    camera / f-stop / shutter / ISO for a camera photo, and location if media-location was
+    granted.
+16. Open a photo from the grid → it fades/scales in; the photo is never black while loading
+    (blurry thumbnail → sharp). Back → shrinks out to the grid, which is where you left it.
+    From inside an album, back must still land in that album.
+17. Albums → open folder A, scroll down, back, open folder B → B starts at the top. Entering /
+    leaving a folder slides; tab changes fade. Nothing flashes "Nothing here." on the way out.
+18. Pinch the grid through several column counts **in one continuous pinch** → steps
+    repeatedly, cells glide to their new slots, the grid does not scroll under two fingers.
+19. Double-tap a photo → zoom animates in and out.
+20. Edit (pencil) on a photo → editor opens. Rotate ×3, mirror, drag crop corners, tap 1:1,
+    move sliders, **Save copy** → toast, editor closes, a new `*_edited_*.jpg` appears next to
+    the original in the grid and in `Pictures/OneGallery_Edits`. Check the saved file matches
+    the preview (orientation, crop, colour). Edit is greyed out on videos and GIFs. System back
+    closes the editor, not the viewer.
+21. **Re-verify frame capture** (step 8) — its save path was refactored.
+22. `gradlew.bat test` → `PhotoEditStateTest` and `ExifDetailsTest` pass.
+
 ---
 
 ## 5a. Measuring performance (read before "optimising" anything)
@@ -334,8 +402,11 @@ frame.
 
 `MediaViewerScreen.kt` (action bar)
 
-Share, Edit, Favorite, Delete and More are empty lambdas. `isFavorite` is hardcoded `false`
-and never read from `MediaStore.IS_FAVORITE`.
+Share, Favorite, Delete and More are empty lambdas. `isFavorite` is hardcoded `false` and never
+read from `MediaStore.IS_FAVORITE`. **Edit is implemented on `viewer-features`** (unverified):
+stills only, saves a copy. Not covered: video trim, GIFs, overwrite-original, free rotation /
+straighten, aspect-*locked* crop dragging (presets only place the rectangle), and Ultra HDR
+gain maps (the saved copy is SDR).
 
 **Albums is now implemented** (folder grid → folder contents → viewer scoped to that folder).
 **Search is still unimplemented** but now says so on screen instead of silently rendering the
@@ -348,6 +419,14 @@ out of the viewer.
 
 Fixed by `MediaThumbnailFetcher` (see §4) plus a larger Coil memory cache. Owner's verdict
 after testing on the Pixel: **"mostly gone"**. Not closed, because "mostly" is not "gone".
+
+`viewer-features` adds an **unmeasured** candidate fix for the remainder: scrubbing drives the
+pager with `scrollToPage`, so every page passed was composed and immediately started a
+*full-resolution* decode (photos) or a `prepare()` + autoplay (videos). Photo pages now load a
+thumbnail until they have been active for 120 ms, and video pages wait 150 ms before preparing.
+Written blind on a machine that cannot run the app — per §5a it counts for nothing until it is
+measured on the Pixel, and it is its own commit (`9e2c182` / `33b168c`) so it can be reverted
+alone.
 
 If the remainder needs chasing, it is probably **not** decoding any more — the next suspect is
 recomposition: every visible filmstrip thumbnail recomposes as the mirrored scroll position
@@ -366,9 +445,10 @@ re-measured since the thumbnail work.
 `VideoPlayerView.kt`
 
 Overlapping audio and background playback are fixed (only the settled pager page plays, and
-`ON_STOP` pauses). What remains is cost: each composed video page still creates and
-`prepare()`s its own player, including pages merely passed while scrubbing the filmstrip.
-Consider a single shared player driven by `pagerState.settledPage`.
+`ON_STOP` pauses). On `viewer-features` (unverified) `prepare()` is deferred until a page has
+been active for 150 ms, so pages merely passed while scrubbing no longer spin up a decoder —
+but each composed video page still *constructs* an ExoPlayer. A single shared player driven by
+`pagerState.settledPage` remains the real fix.
 
 ### 6.9 Grid is hardcoded dark — LOW
 
@@ -426,6 +506,15 @@ Changing either of these back will break things silently, with no error:
 - **Re-sorting a keyed LazyGrid re-anchors to the previously visible item** during the measure
   pass, so `scrollToItem(0)` immediately after a sort is silently undone.
   `scrollToTopAfterReorder()` waits a frame. (§4)
+- **`pointerInput` keyed on a value that the gesture itself changes restarts mid-gesture.** The
+  grid pinch was keyed on `columnCount`: the first column step restarted the block, the
+  restarted block waited for a fresh finger-down, and the rest of the pinch leaked through as a
+  two-finger scroll. Key on `Unit` and read changing values via `rememberUpdatedState`. The
+  same reasoning is why `swipeUpToReveal(enabled = …)` never adds/removes its modifier. (§4)
+- **Anything that animates out keeps composing with *current* state.** `closeViewer` must not
+  clear `viewerAlbumId`, and the album grid must build its items from the `GridDestination`'s
+  album rather than `openedAlbumId` — both are already reset by the time the exit animation
+  draws. (§4)
 - **Grid state must stay hoisted in `GalleryApp`.** The viewer replaces the grid in the
   composition rather than stacking on it, so anything remembered inside `GalleryGridScreen` is
   destroyed when a photo opens. (§4)
@@ -433,6 +522,35 @@ Changing either of these back will break things silently, with no error:
 ---
 
 ## 7. Changelog
+
+### 2026-09-18 — `viewer-features` branch (**NOT COMPILED, NOT RUN**)
+
+Written on a machine with no JDK / Android SDK, as one commit per concern so a build failure
+or a regression can be bisected. First job: `gradlew.bat assembleDebug`, `gradlew.bat test`,
+then §5 steps 13–22 on the Pixel. **Adds `junit:4.13.2` — first build needs network.**
+
+1. `33b168c` **Review fixes.** Grid pinch restarted itself on the first column step (§6a).
+   Filmstrip scrubbing started every video it passed; activation now waits 150 ms and
+   `prepare()` is deferred (§6.5). Poster thumbnail over the SurfaceView until the first frame.
+2. `095d985` **Videos start muted**, with a toggle at the end of the seek bar. State is
+   per-viewer-session, not per player.
+3. `423a84f` **Swipe up for details**, and the sheet now reads real EXIF off the main thread
+   (camera, aperture, shutter, ISO, focal length; GPS when `ACCESS_MEDIA_LOCATION` was granted).
+4. `9e2c182` **Transitions.** Grid↔viewer fade+scale, tab fade / album slide, `animateItem()`
+   reflow, animated double-tap zoom, thumbnail placeholder → full-res crossfade with the
+   full decode deferred until a page is active (§6.15, unmeasured). Also fixes folders opening
+   at the previous folder's scroll offset (one `LazyGridState` serves every album).
+5. `ea5d63a` **Basic photo editor** (§4, §6.4) plus the project's first unit tests. The
+   transform reduction was checked against a brute-force pixel model before commit — the same
+   model is `PhotoEditStateTest`. `MediaStoreRepository`'s insert/pending/EXIF/publish/cleanup
+   sequence became one helper (`insertJpeg`) shared with frame capture: **re-verify capture.**
+
+Known risks, in the order I would expect them to bite: a wrong import or signature somewhere
+in ~1,500 new lines; `Icons.Rounded.RotateLeft/RotateRight/VolumeUp/VolumeOff` may emit
+deprecation warnings — the plain variants were chosen blind because they are guaranteed to
+exist; switch to `Icons.AutoMirrored.Rounded.*` if the compiler says so; `animateItem()` interacting with
+`scrollToTopAfterReorder()` on a re-sort; the swipe-up detector being too eager or too shy
+(tune `triggerDistancePx` / the 2:1 verticality test in `SwipeUpGesture.kt`).
 
 ### 2026-09-18 — thumbnails, sorting, launcher icon
 
@@ -599,6 +717,8 @@ Still unexercised on-device: the viewer, filmstrip sync, and video frame capture
 
 Roughly dependency-ordered. Good first tasks are marked ★.
 
+0. ★ **Build, test and walk §5 steps 13–22 for the `viewer-features` branch.** It has never
+   been compiled. Then measure the scrub change on the Pixel (§5a) and either keep or revert it.
 1. ★ **Paginate the library load** (§6.16). `queryMediaItems` pulls all 3,132 rows into memory
    on every change. Now the largest remaining structural problem — thumbnail decoding is done.
 2. **Chase the residual filmstrip stutter** (§6.15) *only if it still bothers you*. Decoding is

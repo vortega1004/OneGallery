@@ -59,7 +59,15 @@ gallery_clone/
 │           │   │   └── VideoSnapshotManager.kt    # Dual-path frame extraction & EXIF saver
 │           │   ├── viewer/
 │           │   │   ├── MediaViewerScreen.kt       # Fullscreen zoomable pager + synchronized filmstrip
-│           │   │   └── MediaDetailsSheet.kt       # Swipe-up EXIF and technical details sheet
+│           │   │   ├── MediaDetailsSheet.kt       # Swipe-up EXIF and technical details sheet
+│           │   │   ├── ExifDetails.kt             # EXIF reader for the details sheet
+│           │   │   └── SwipeUpGesture.kt          # Swipe-up detector that opens the sheet
+│           │   ├── editor/
+│           │   │   ├── PhotoEditorScreen.kt       # Crop & rotate, adjust, save-a-copy UI
+│           │   │   ├── PhotoEditState.kt          # Pure edit state + transform math (unit-tested)
+│           │   │   └── PhotoEditRenderer.kt       # Applies an edit to a bitmap
+│           │   ├── common/
+│           │   │   └── MediaImageRequests.kt      # Shared Coil requests (thumbnail / full-size)
 │           │   ├── grid/
 │           │   │   └── GalleryGridScreen.kt       # Responsive pinch-to-zoom 1-5 column grid
 │           │   └── theme/
