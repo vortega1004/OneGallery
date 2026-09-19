@@ -1,8 +1,7 @@
 # OneGallery — Engineering Handoff
 
-**Last verified:** 2026-09-18 — `viewer-features` (PR #2) built and tested by the owner before
-merge. The itemised rows in §1 were measured at `3b38155`; PR #2's result is owner-reported as
-a whole (see its row) rather than step by step.
+**Last verified:** 2026-09-18 — `viewer-features` (PR #2) built, tested and merged. Earlier
+rows in §1 were measured at `3b38155`; PR #2's row lists what was checked on its own head.
 **Status:** Builds clean. Smoke-tested on the emulator and on a physical Pixel 10 Pro XL
 against a real 3,132-item library. Video frame capture works on real hardware. Two
 performance problems appear only at that scale (§6.15, §6.16). See §1 for exactly what was
@@ -53,7 +52,7 @@ crashes** on either. Anything the emulator's tiny library cannot exercise is cal
 | Thumbnail decoding | **VERIFIED firing** on emulator (fetch path instrumented and counted); **speedup only measurable on real photos** — emulator test images are 480×360, so there is nothing to save. Owner reports stutter "mostly gone" on the Pixel |
 | Launcher icon | **VERIFIED** — adaptive icon renders correctly under the launcher mask |
 | Automated tests | First JVM unit tests added in PR #2 (`gradlew.bat test`): `PhotoEditStateTest`, `FrameStepTest`, `ExifDetailsTest`. Pure logic only — nothing covers the UI, MediaStore or playback |
-| `viewer-features` (PR #2) | **BUILT AND TESTED by the owner** before merge (2026-09-18): "everything is fine". Covers swipe-up details + EXIF, default-muted video, photo editor, transitions, one-handed ghost video controls + frame stepping, and the review fixes. **Owner-reported, not itemised**: the device, warning count and per-step results of §5 steps 13–24 were not relayed to the agent that wrote this row — whoever ran them, please replace this row with the specifics, in the style of the rows above |
+| `viewer-features` (PR #2) | **VERIFIED on emulator** at `1ea2d9f`. Compiles first try (4 deprecation warnings: `RotateLeft`/`RotateRight`/`VolumeUp`/`VolumeOff`); 17 unit tests pass; release APK 4.27 MB. Re-checked the VERIFIED behaviours it touches: frame capture still 1280×720 with EXIF + `Captured from…` UserComment; overlay collision clear (capture y2128, seek y2332, filmstrip y2578); album scoping correct with no stale `viewerAlbumId`; grid restore returns to the photo last viewed. Editor rotate→save copy: 480×360 → 360×480, EXIF carried, original untouched. Zero crashes. Owner independently confirmed on the emulator. **Not exercised:** crop / brightness / contrast / saturation, frame stepping, jog strip, swipe-up tuning, rewritten pinch — all need real touch |
 
 The project previously did **not** compile. One Kotlin error and two missing build files
 were fixed on 2026-09-18 — see §7 for the changelog.

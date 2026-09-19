@@ -131,8 +131,7 @@ retry / "Open settings" are all meant to work since the review-fix pass — plea
 
 As of 2026-09-18: builds clean. Smoke-tested with no crashes on an emulator and on a
 **physical Pixel 10 Pro XL** against a real 3,132-item library (itemised at `3b38155`); the
-viewer-features work merged on top of that (PR #2) was built and tested by the owner before
-merge.
+viewer-features work on top of that (PR #2) was built and tested on the emulator.
 
 Working: the grid with live MediaStore refresh; **Albums** folder browsing with the viewer
 scoped to the folder you opened from; **sorting** for both the folder list (8 orderings) and
