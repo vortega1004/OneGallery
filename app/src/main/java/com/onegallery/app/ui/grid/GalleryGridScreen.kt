@@ -26,10 +26,14 @@ import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.Sort
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.NavigationBar
@@ -39,6 +43,9 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,6 +61,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import com.onegallery.app.domain.Album
+import com.onegallery.app.domain.AlbumSort
+import com.onegallery.app.domain.sortedBy
 import com.onegallery.app.domain.MediaItem
 import com.onegallery.app.domain.toAlbums
 import com.onegallery.app.ui.theme.DarkBackground
@@ -90,11 +99,13 @@ fun GalleryGridScreen(
     albumGridState: LazyGridState,
     restoreToItemId: Long?,
     onRestoreHandled: () -> Unit,
+    albumSort: AlbumSort,
+    onAlbumSortChange: (AlbumSort) -> Unit,
     onItemClick: (albumId: String?, index: Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
     // Derived from the list already in memory — no second MediaStore query.
-    val albums = remember(mediaItems) { mediaItems.toAlbums() }
+    val albums = remember(mediaItems, albumSort) { mediaItems.toAlbums().sortedBy(albumSort) }
     val openedAlbum = remember(albums, openedAlbumId) {
         albums.firstOrNull { it.id == openedAlbumId }
     }
@@ -167,7 +178,10 @@ fun GalleryGridScreen(
                 selectedTab == TAB_ALBUMS -> {
                     OneUIHeader(
                         title = "Albums",
-                        subtitle = albumCountLabel(albums.size, mediaItems.size)
+                        subtitle = albumCountLabel(albums.size, mediaItems.size),
+                        trailing = {
+                            AlbumSortMenu(current = albumSort, onSelect = onAlbumSortChange)
+                        }
                     )
                     AlbumGrid(albums = albums, onAlbumClick = { onOpenAlbum(it.id) })
                 }
@@ -374,7 +388,8 @@ private fun MediaGrid(
 private fun OneUIHeader(
     title: String,
     subtitle: String,
-    onBack: (() -> Unit)? = null
+    onBack: (() -> Unit)? = null,
+    trailing: (@Composable () -> Unit)? = null
 ) {
     Row(
         modifier = Modifier
@@ -397,7 +412,7 @@ private fun OneUIHeader(
             }
             Spacer(modifier = Modifier.size(4.dp))
         }
-        Column {
+        Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = title,
                 color = DarkTextPrimary,
@@ -412,6 +427,60 @@ private fun OneUIHeader(
                 color = DarkTextSecondary,
                 fontSize = 14.sp
             )
+        }
+        trailing?.invoke()
+    }
+}
+
+@Composable
+private fun AlbumSortMenu(
+    current: AlbumSort,
+    onSelect: (AlbumSort) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    Box {
+        IconButton(onClick = { expanded = true }) {
+            Icon(
+                imageVector = Icons.AutoMirrored.Rounded.Sort,
+                contentDescription = "Sort albums",
+                tint = DarkTextPrimary
+            )
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            containerColor = DarkSurface
+        ) {
+            AlbumSort.entries.forEach { option ->
+                DropdownMenuItem(
+                    onClick = {
+                        onSelect(option)
+                        expanded = false
+                    },
+                    text = {
+                        Text(
+                            text = option.label,
+                            color = if (option == current) OneUIBlue else DarkTextPrimary,
+                            fontSize = 15.sp,
+                            fontWeight = if (option == current) FontWeight.SemiBold else FontWeight.Normal
+                        )
+                    },
+                    trailingIcon = {
+                        // Reserve the slot even when unselected so labels stay aligned
+                        if (option == current) {
+                            Icon(
+                                imageVector = Icons.Rounded.Check,
+                                contentDescription = null,
+                                tint = OneUIBlue,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        } else {
+                            Spacer(modifier = Modifier.size(18.dp))
+                        }
+                    }
+                )
+            }
         }
     }
 }

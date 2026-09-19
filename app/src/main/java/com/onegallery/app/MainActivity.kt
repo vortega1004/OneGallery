@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.onegallery.app.domain.AlbumSort
 import com.onegallery.app.domain.MediaItem
 import com.onegallery.app.ui.grid.GalleryGridScreen
 import com.onegallery.app.ui.grid.TAB_PICTURES
@@ -188,6 +189,9 @@ fun GalleryApp(viewModel: GalleryViewModel) {
     var viewerVisibleItemId by rememberSaveable { mutableStateOf<Long?>(null) }
     var restoreToItemId by rememberSaveable { mutableStateOf<Long?>(null) }
 
+    // Hoisted with the rest of the browsing state so the chosen order survives opening a photo.
+    var albumSort by rememberSaveable { mutableStateOf(AlbumSort.DEFAULT) }
+
     // Scope the pager to the set the user was actually looking at, so swiping inside an album
     // stays inside that album. Kept as a bucket id rather than a list so it survives process
     // death and still tracks live MediaStore updates.
@@ -227,6 +231,8 @@ fun GalleryApp(viewModel: GalleryViewModel) {
             albumGridState = albumGridState,
             restoreToItemId = restoreToItemId,
             onRestoreHandled = { restoreToItemId = null },
+            albumSort = albumSort,
+            onAlbumSortChange = { albumSort = it },
             onItemClick = { albumId, index ->
                 viewerAlbumId = albumId
                 selectedItemIndex = index

@@ -48,8 +48,48 @@ data class Album(
     val name: String,
     val coverUri: Uri,
     val count: Int,
-    val relativePath: String
-)
+    val relativePath: String,
+    /** Date of the most recent item, used for "recently updated" ordering. */
+    val newestDate: Long = 0L,
+    /** Date of the oldest item, so "oldest first" means the album you started longest ago. */
+    val oldestDate: Long = 0L,
+    /** Sum of every item's file size, for ordering by disk footprint. */
+    val totalBytes: Long = 0L,
+    val videoCount: Int = 0
+) {
+    val photoCount: Int get() = count - videoCount
+}
+
+/** Ordering options offered on the Albums tab. */
+enum class AlbumSort(val label: String) {
+    NAME_ASC("Name (A–Z)"),
+    NAME_DESC("Name (Z–A)"),
+    NEWEST_FIRST("Newest first"),
+    OLDEST_FIRST("Oldest first"),
+    MOST_ITEMS("Most items"),
+    FEWEST_ITEMS("Fewest items"),
+    LARGEST("Largest on disk"),
+    SMALLEST("Smallest on disk");
+
+    companion object {
+        val DEFAULT = NEWEST_FIRST
+    }
+}
+
+/**
+ * Names are compared case-insensitively so "DCIM" and "dcim" sort together rather than all
+ * capitalised folders being grouped ahead of lowercase ones by their char codes.
+ */
+fun List<Album>.sortedBy(sort: AlbumSort): List<Album> = when (sort) {
+    AlbumSort.NAME_ASC -> sortedBy { it.name.lowercase() }
+    AlbumSort.NAME_DESC -> sortedByDescending { it.name.lowercase() }
+    AlbumSort.NEWEST_FIRST -> sortedByDescending { it.newestDate }
+    AlbumSort.OLDEST_FIRST -> sortedBy { it.oldestDate }
+    AlbumSort.MOST_ITEMS -> sortedByDescending { it.count }
+    AlbumSort.FEWEST_ITEMS -> sortedBy { it.count }
+    AlbumSort.LARGEST -> sortedByDescending { it.totalBytes }
+    AlbumSort.SMALLEST -> sortedBy { it.totalBytes }
+}
 
 /**
  * Groups an already-loaded media list into device folders (MediaStore buckets).
@@ -65,16 +105,19 @@ fun List<MediaItem>.toAlbums(): List<Album> =
     groupBy { it.bucketId }
         .map { (bucketId, itemsInBucket) ->
             val newest = itemsInBucket.first()
-            newest.dateTaken to Album(
+            Album(
                 id = bucketId,
                 name = newest.bucketName,
                 coverUri = newest.uri,
                 count = itemsInBucket.size,
-                relativePath = newest.path.substringBeforeLast('/', "")
+                relativePath = newest.path.substringBeforeLast('/', ""),
+                newestDate = newest.dateTaken,
+                oldestDate = itemsInBucket.last().dateTaken,
+                totalBytes = itemsInBucket.sumOf { it.size },
+                videoCount = itemsInBucket.count { it.isVideo }
             )
         }
-        .sortedByDescending { (newestDate, _) -> newestDate }
-        .map { (_, album) -> album }
+        .sortedBy(AlbumSort.DEFAULT)
 
 data class DateGroupedMedia(
     val dateHeader: String,
