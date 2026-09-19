@@ -140,7 +140,9 @@ fun MediaViewerScreen(
                 // Video controls share the viewer's overlay visibility, so one tap hides/shows both
                 VideoPlayerView(
                     mediaItem = item,
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .swipeUpToReveal { showDetailsSheet = true },
                     isActivePage = isActivePage,
                     controlsVisible = isOverlayVisible,
                     onControlsVisibleChange = { isOverlayVisible = it },
@@ -153,7 +155,8 @@ fun MediaViewerScreen(
                 ZoomableImageView(
                     mediaItem = item,
                     isActivePage = isActivePage,
-                    onTap = { isOverlayVisible = !isOverlayVisible }
+                    onTap = { isOverlayVisible = !isOverlayVisible },
+                    onSwipeUp = { showDetailsSheet = true }
                 )
             }
         }
@@ -308,7 +311,8 @@ fun MediaViewerScreen(
 private fun ZoomableImageView(
     mediaItem: MediaItem,
     isActivePage: Boolean,
-    onTap: () -> Unit
+    onTap: () -> Unit,
+    onSwipeUp: () -> Unit
 ) {
     var scale by remember { mutableFloatStateOf(1f) }
     var offsetX by remember { mutableFloatStateOf(0f) }
@@ -326,6 +330,11 @@ private fun ZoomableImageView(
     Box(
         modifier = Modifier
             .fillMaxSize()
+            // Swipe up opens the details sheet. Only at 1x: once zoomed, a vertical drag pans
+            // the photo (and at the photo's edge it should do nothing, not pop a sheet).
+            // First in the chain = outermost = sees each event after the zoom loop below has
+            // had its chance to consume it.
+            .swipeUpToReveal(enabled = scale == 1f, onSwipeUp = onSwipeUp)
             .pointerInput(Unit) {
                 detectTapGestures(
                     onTap = { onTap() },
