@@ -1,15 +1,20 @@
 # OneGallery — Engineering Handoff
 
-**Last verified:** 2026-09-18 at `a1217e2`
+**Last verified:** 2026-09-18 at `3b38155`
 **Status:** Builds clean. Smoke-tested on the emulator and on a physical Pixel 10 Pro XL
 against a real 3,132-item library. Video frame capture works on real hardware. Two
 performance problems appear only at that scale (§6.15, §6.16). See §1 for exactly what was
 and was not exercised.
 **Owner:** Victor Ortega
 
-This document is the single source of truth for anyone — human or AI agent — picking up
-this codebase. Read it before making changes. Everything marked **VERIFIED** was confirmed
-by actually running it on the owner's machine, not inferred from reading code.
+This document is the single source of truth for anyone — human or AI agent — picking up this
+codebase. Everything marked **VERIFIED** was confirmed by actually running it, not inferred
+from reading code.
+
+**If you are here to hunt bugs or improve performance, read §6a and §9 first.** §6a lists
+things that look like bugs and have already been disproved; §5a explains why the emulator
+cannot measure this app's performance problems. Both exist to stop you repeating work that
+has already been done.
 
 ---
 
@@ -40,7 +45,7 @@ crashes** on either. Anything the emulator's tiny library cannot exercise is cal
 | Filmstrip scrubbing *feel* | **NOT ASSESSED** — subjective, needs a human thumb |
 | `minSdk` 26 → 29 | **NOT TESTABLE HERE** — accepted as a product decision; drops Android 8/9 |
 | Run on physical Pixel | **VERIFIED** — Pixel 10 Pro XL, Android 17 / API 37, 3,132 items (2,451 photos + 681 videos). Video frame capture confirmed working on real hardware. Two performance problems surfaced only at this scale: §6.15, §6.16 |
-| Albums tab | **VERIFIED on emulator** — folder grid, drill-down, viewer scoped to the album, full back chain |
+| Albums tab | **VERIFIED on emulator** — folder grid, drill-down, viewer scoped to the album, full back chain. Also exercised by the owner on the Pixel |
 | Grid position restored on exit | **VERIFIED on emulator** — returns to the photo last viewed, even after paging far from the entry point; no jolt when the item is already visible |
 | Sorting (albums + media) | **VERIFIED on emulator** — all options present, orders correct, grid/viewer indices stay aligned after a re-sort, selection survives the viewer. "Date taken" vs "Date added" divergence **NOT verifiable on the emulator**: every test file has a null EXIF capture time, so `dateTaken` falls back to `dateAdded` and the two orders coincide by definition |
 | Thumbnail decoding | **VERIFIED firing** on emulator (fetch path instrumented and counted); **speedup only measurable on real photos** — emulator test images are 480×360, so there is nothing to save. Owner reports stutter "mostly gone" on the Pixel |
@@ -131,19 +136,25 @@ of the UI state lives in composables and is passed down.
 > simply backing out of a photo you can still see does not jolt the list.
 
 ```
-app/src/main/java/com/onegallery/app/
-├── MainActivity.kt              # Permission gate, ACTION_VIEW handling, grid/viewer switch
-├── GalleryViewModel.kt          # StateFlow of the media list (single MediaStore subscription)
-├── data/MediaStoreRepository.kt # ContentResolver queries, ContentObserver, snapshot saver
-├── domain/MediaItem.kt          # Models + toAlbums() (pure bucket grouping)
-└── ui/
-    ├── grid/GalleryGridScreen.kt             # Pinch-zoom grid, Albums folders, bottom nav
-    ├── viewer/MediaViewerScreen.kt           # HorizontalPager + zoomable image + overlays
-    ├── viewer/MediaDetailsSheet.kt           # ModalBottomSheet with EXIF-ish details
-    ├── filmstrip/FilmStripInfinityViewer.kt  # Compose filmstrip, 1:1 synced with the pager
-    ├── video/VideoPlayerView.kt              # Media3 PlayerView + capture shutter UI
-    ├── video/VideoSnapshotManager.kt         # Dual-path frame extraction
-    └── theme/{Color,Theme}.kt                # One UI palettes
+app/src/main/
+├── AndroidManifest.xml
+├── res/                          # Only the launcher icon lives here (adaptive + monochrome)
+└── java/com/onegallery/app/
+    ├── MainActivity.kt           # Permission gate, ACTION_VIEW, grid/viewer switch, hoisted UI state
+    ├── OneGalleryApplication.kt  # Supplies the Coil ImageLoader (thumbnail fetcher + cache)
+    ├── GalleryViewModel.kt       # StateFlow of the media list (single MediaStore subscription)
+    ├── data/
+    │   ├── MediaStoreRepository.kt   # ContentResolver queries, ContentObserver, snapshot saver
+    │   └── MediaThumbnailFetcher.kt  # Coil fetcher: MediaStore thumbnails for small requests
+    ├── domain/MediaItem.kt       # Models, toAlbums(), AlbumSort/MediaSort + their sorts
+    └── ui/
+        ├── grid/GalleryGridScreen.kt             # Grid, Albums folders, sort menus, bottom nav
+        ├── viewer/MediaViewerScreen.kt           # HorizontalPager + zoomable image + overlays
+        ├── viewer/MediaDetailsSheet.kt           # ModalBottomSheet with EXIF-ish details
+        ├── filmstrip/FilmStripInfinityViewer.kt  # Compose filmstrip, 1:1 synced with the pager
+        ├── video/VideoPlayerView.kt              # Media3 PlayerView + capture shutter UI
+        ├── video/VideoSnapshotManager.kt         # Dual-path frame extraction
+        └── theme/{Color,Theme}.kt                # One UI palettes
 ```
 
 ### Image loading
@@ -179,10 +190,10 @@ measured and passed to `VideoPlayerView` as `controlsPadding` so nothing overlap
 
 ### Intentional design notes
 
-- **No `res/` resources.** The manifest deliberately uses framework resources
-  (`@android:drawable/ic_menu_gallery`, `@android:style/Theme.Material.NoActionBar`) so the
-  project needs no `res/values/themes.xml`. `res/drawable/` and `res/values/` exist but are
-  empty. If you add resources that's fine — just don't assume they were forgotten.
+- **`res/` holds only the launcher icon.** The manifest still uses a framework *theme*
+  (`@android:style/Theme.Material.NoActionBar`), so there is no `res/values/themes.xml` and no
+  strings file — UI text is inline in the composables. That is deliberate, not an oversight.
+  Adding resources is fine; just don't assume existing ones were forgotten.
 - **Edge-to-edge** is enabled in `MainActivity` with forced light system-bar icons, because
   the UI is hardcoded dark (§6.9). Revisit together with the light theme pass.
 
@@ -259,6 +270,40 @@ Manual smoke test, in order:
 
 ---
 
+## 5a. Measuring performance (read before "optimising" anything)
+
+**The emulator cannot reproduce this app's performance problems.** Its test library is tiny
+and its images are small; the two issues that mattered (§6.15, §6.16) were invisible there and
+only appeared on a 3,132-item phone with real camera JPEGs. Any perf claim measured on the
+emulator is worthless. Measure on hardware with a real library.
+
+Reset counters, exercise the thing, then read:
+
+```bash
+adb shell dumpsys gfxinfo com.onegallery.app reset
+```
+
+```bash
+adb shell dumpsys gfxinfo com.onegallery.app
+```
+
+Look at "Janky frames" as a percentage and the 90th/95th/99th percentiles. Compare
+**before and after** on the same device and the same library — absolute numbers mean little
+across devices.
+
+For allocation churn during a scroll, `adb shell dumpsys meminfo com.onegallery.app` before
+and after tells you whether a change is trading CPU for heap.
+
+### Ground rules
+
+- **Reproduce first.** If you cannot measure the problem, you cannot show you fixed it.
+- **One change at a time.** Both perf fixes so far were confounded by bundling; the second
+  time (thumbnails + memory cache + crossfade) it was impossible to attribute the improvement.
+- **State what you measured on.** "Faster" with no device, library size or numbers is not a
+  result. See §9.
+
+---
+
 ## 6. Known issues
 
 Ranked by how much they will affect a first test run. Section numbers are kept stable so old
@@ -315,6 +360,75 @@ Owner, on the Pixel: "doesn't populate that fast, but it's not unbearable." Thum
 is now cheap (§4), but the structural half is untouched: `MediaStoreRepository.queryMediaItems`
 still loads the **entire** library into memory on every change, with no pagination. Not
 re-measured since the thumbnail work.
+
+### 6.5 Every video page still builds its own ExoPlayer — LOW (was MEDIUM)
+
+`VideoPlayerView.kt`
+
+Overlapping audio and background playback are fixed (only the settled pager page plays, and
+`ON_STOP` pauses). What remains is cost: each composed video page still creates and
+`prepare()`s its own player, including pages merely passed while scrubbing the filmstrip.
+Consider a single shared player driven by `pagerState.settledPage`.
+
+### 6.9 Grid is hardcoded dark — LOW
+
+`GalleryGridScreen.kt` and throughout. `Theme.kt` defines a complete light color scheme,
+but the grid hardcodes `DarkBackground` and `DarkText*`. Light mode looks half-finished.
+`MainActivity` forces light system-bar icons to match; undo that when this is fixed.
+
+### 6.13 Partial access can't be widened from inside the app — LOW
+
+With "Select photos…" (Android 14+) the gallery shows only the chosen items and offers no
+"select more" entry point. Re-requesting the media permissions re-opens the system picker.
+
+### 6.14 ACTION_VIEW items have synthetic metadata — LOW
+
+`MediaStoreRepository.mediaItemFromUri()` builds a standalone `MediaItem` (id `-1`, no path,
+no dimensions, date = now) for content handed over by other apps, so the details sheet is
+sparse for those. The viewer shows that one item only — no filmstrip neighbours.
+
+### Fixed on 2026-09-18 (unverified — see note above)
+
+| # | Issue | Resolution |
+| --- | --- | --- |
+| 6.1 | Permission dead-end on Android 14/15 | `READ_MEDIA_VISUAL_USER_SELECTED` requested; any media grant (full/partial/images-only) counts; retry + "Open settings" buttons; re-check in `onStart` |
+| 6.2 | Full MediaStore query on the main thread | Observer only signals; conflated + rate-limited query on `Dispatchers.IO`; flow owned by `GalleryViewModel` |
+| 6.6 | Filmstrip drew two overlapping frames | Per-item border removed; the center bracket is the selection marker |
+| 6.7 | Grid pinch-to-zoom rarely triggered | Zoom accumulated across the gesture, handled in the Initial pass so scrolling can't cancel it |
+| 6.8 | `minSdk = 26` but query needed API 29 | `minSdk` raised to 29; pre-Q branches and `WRITE_EXTERNAL_STORAGE` removed |
+| 6.10 | Deprecated icon warning | `Icons.AutoMirrored.Rounded.ArrowBack` |
+| 6.11 | Dead `FilmStripLayoutManager.kt` | Deleted (recover from git history if wanted) along with the `recyclerview` dependency |
+| 6.12 | Viewer crash when the library shrinks | Page index clamped before indexing |
+
+---
+
+## 6a. Dead ends — already investigated, do not re-tread
+
+Each of these looked like a bug and was **disproved by testing**. They are recorded because
+the code still *reads* as though they might be problems, so a fresh reviewer will find them
+again.
+
+| Hypothesis | Verdict |
+| --- | --- |
+| `date_taken` is an invalid projection column on `MediaStore.Files` | **False.** The constant is `datetaken`, not `date_taken`. The full projection queries fine. |
+| `MediaStore.Files` returns an empty cursor on Android 13+ without `READ_EXTERNAL_STORAGE`, so the typed Images/Video collections are required | **False.** The `Files` query returns everything once the files sit in a readable directory. A refactor to typed collections was written, tested, found unnecessary and reverted. |
+| The app cannot see media that is definitely on the device | **Not a bug.** Files in `/sdcard/Download/` are invisible to an app holding only `READ_MEDIA_IMAGES`/`READ_MEDIA_VIDEO`, and MediaProvider enforces that by filtering rows, not by throwing. See §5. |
+| `res/` was left empty by mistake | **Deliberate.** Framework theme, no strings file. See §4. |
+| `FilmStripLayoutManager.kt` needs fixing | **Deleted.** It was an unused RecyclerView port; the Compose filmstrip is what runs. In git history if wanted. |
+
+### Traps that are real, and are load-bearing
+
+Changing either of these back will break things silently, with no error:
+
+- **Coil fetchers must be keyed on `coil3.Uri`, not `android.net.Uri`.** Mappers run before
+  fetchers; `AndroidUriMapper` has already converted the platform Uri. A factory declared over
+  `android.net.Uri` is simply never invoked. (§4)
+- **Re-sorting a keyed LazyGrid re-anchors to the previously visible item** during the measure
+  pass, so `scrollToItem(0)` immediately after a sort is silently undone.
+  `scrollToTopAfterReorder()` waits a frame. (§4)
+- **Grid state must stay hoisted in `GalleryApp`.** The viewer replaces the grid in the
+  composition rather than stacking on it, so anything remembered inside `GalleryGridScreen` is
+  destroyed when a photo opens. (§4)
 
 ---
 
@@ -510,14 +624,47 @@ Roughly dependency-ordered. Good first tasks are marked ★.
 
 ## 9. Conventions for AI coding agents
 
+### Start here
+
+1. Read **§6a first** — it lists things that look like bugs and are not. It will save you
+   re-deriving three dead ends that have already cost a session each.
+2. Read **§1** for what is verified and *on which device*. Emulator-verified and
+   phone-verified are not interchangeable.
+3. For performance work, read **§5a** before touching anything.
+
+### Rules
+
 - **Verify, don't assume.** Run `gradlew.bat assembleDebug` after any change. This codebase
-  previously shipped a state that looked correct and did not compile. If you cannot build
-  (no JDK/SDK on the machine), say so loudly in §1 and §7 — as the 2026-09-18 pass did.
+  previously shipped a state that looked correct and did not compile. If you cannot build (no
+  JDK/SDK on the machine), say so loudly in §1 and §7 — as the 2026-09-18 pass did.
 - **Don't trust the docs over the code.** `CLAUDE.md` and `README.md` describe intended
-  Samsung behavior, some of it aspirational (see §6.3). Code is truth.
-- **One dead end to avoid:** `res/` is intentionally empty (§4).
+  Samsung behaviour, some of it aspirational (see §6.3). Code is truth. This file is the
+  exception: it is maintained against what was actually run.
+- **Report what you measured, on what.** "Faster" or "fixed" without a device, a library size
+  and a number is not a result. If you only compiled, say you only compiled. Several findings
+  in §7 are recorded as *disproved* precisely because someone checked instead of asserting.
+- **Don't regress what §1 marks VERIFIED.** In particular: viewer scoping to an album, grid
+  position restoring on exit, grid/viewer index alignment after a re-sort, and the three
+  permission paths. All are easy to break with an innocuous-looking refactor and none has an
+  automated test.
+- **Prefer one change per commit** when it touches performance. Bundled fixes cannot be
+  attributed — see §5a.
 - **Never commit** `local.properties`, keystores, or `app/build/`.
 - **Don't bump `compileSdk` down** to silence the AGP warning; suppress it or upgrade AGP.
-- **State the scope of your testing** in PR descriptions — say whether you only compiled, or
-  actually ran it on a device/emulator.
-- **Update §7 and §1** when you change build status or fix a listed issue.
+- **Update §1, §6 and §7** when you change build status, fix a listed issue, or disprove one.
+  A stale §1 is worse than no §1: this document has twice told readers the build was broken
+  when it was fine, and once the reverse.
+
+### Useful techniques found the hard way
+
+- `uiautomator dump` beats screenshots for verifying layout and state: it gives exact pixel
+  bounds and every `content-desc`, so "do these overlap?" and "which photo is showing?"
+  become arithmetic rather than eyeballing. The video controls auto-hide after 3 s and
+  screenshots lose the race.
+- When a MediaStore query looks wrong, compare the app's row count against
+  `adb shell content query` on the same URI. Divergence means access scope; agreement means a
+  real query bug. Shell is **not** subject to the app's scoped-storage limits, so shell seeing
+  media proves nothing about what the app can see.
+- Drive UI one action per command with a dump in between. Batched `input tap` calls outrun the
+  UI and silently land on the wrong target — several false results in this project's history
+  came from exactly that.

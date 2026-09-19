@@ -121,7 +121,7 @@ retry / "Open settings" are all meant to work since the review-fix pass — plea
 
 ## Project status
 
-As of 2026-09-18 (`a1217e2`): `assembleDebug` and `assembleRelease` both pass with zero compile
+As of 2026-09-18 (`3b38155`): `assembleDebug` and `assembleRelease` both pass with zero compile
 warnings. Smoke-tested with no crashes on an emulator and on a **physical Pixel 10 Pro XL**
 against a real 3,132-item library.
 
@@ -142,8 +142,10 @@ still no automated tests. `HANDOFF.md` §1 has the full matrix of what was and w
 exercised, and on which device.
 
 Known issues are documented with file/line references in **[HANDOFF.md](HANDOFF.md)** — read
-that before contributing. It also carries the architecture map, the suggested work queue, and
-conventions for AI coding agents working on this repo.
+that before contributing. It also carries the architecture map, the work queue, how to measure
+performance meaningfully (§5a), and a list of things that *look* like bugs and have already
+been disproved (§6a). If you are reviewing this codebase for bugs or performance, start with
+those two sections.
 
 ---
 
