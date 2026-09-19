@@ -62,6 +62,8 @@ import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import com.onegallery.app.domain.Album
 import com.onegallery.app.domain.AlbumSort
+import com.onegallery.app.domain.MediaSort
+import com.onegallery.app.domain.forAlbum
 import com.onegallery.app.domain.sortedBy
 import com.onegallery.app.domain.MediaItem
 import com.onegallery.app.domain.toAlbums
@@ -99,8 +101,11 @@ fun GalleryGridScreen(
     albumGridState: LazyGridState,
     restoreToItemId: Long?,
     onRestoreHandled: () -> Unit,
+    albumListGridState: LazyGridState,
     albumSort: AlbumSort,
     onAlbumSortChange: (AlbumSort) -> Unit,
+    mediaSort: MediaSort,
+    onMediaSortChange: (MediaSort) -> Unit,
     onItemClick: (albumId: String?, index: Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -109,8 +114,13 @@ fun GalleryGridScreen(
     val openedAlbum = remember(albums, openedAlbumId) {
         albums.firstOrNull { it.id == openedAlbumId }
     }
-    val albumItems = remember(mediaItems, openedAlbumId) {
-        openedAlbumId?.let { id -> mediaItems.filter { it.bucketId == id } }.orEmpty()
+    // Same expression the viewer uses to build its pager list — see MediaItem.forAlbum.
+    val albumItems = remember(mediaItems, openedAlbumId, mediaSort) {
+        if (openedAlbumId == null) emptyList()
+        else mediaItems.forAlbum(openedAlbumId).sortedBy(mediaSort)
+    }
+    val sortedAllItems = remember(mediaItems, mediaSort) {
+        mediaItems.forAlbum(null).sortedBy(mediaSort)
     }
 
     // Inside an album, back returns to the folder list rather than leaving the screen.
@@ -162,7 +172,16 @@ fun GalleryGridScreen(
                     OneUIHeader(
                         title = openedAlbum.name,
                         subtitle = itemCountLabel(albumItems.size),
-                        onBack = { onOpenAlbum(null) }
+                        onBack = { onOpenAlbum(null) },
+                        trailing = {
+                            SortMenu(
+                                current = mediaSort,
+                                options = MediaSort.entries,
+                                label = { it.label },
+                                contentDescription = "Sort photos and videos",
+                                onSelect = onMediaSortChange
+                            )
+                        }
                     )
                     MediaGrid(
                         mediaItems = albumItems,
@@ -180,10 +199,20 @@ fun GalleryGridScreen(
                         title = "Albums",
                         subtitle = albumCountLabel(albums.size, mediaItems.size),
                         trailing = {
-                            AlbumSortMenu(current = albumSort, onSelect = onAlbumSortChange)
+                            SortMenu(
+                                current = albumSort,
+                                options = AlbumSort.entries,
+                                label = { it.label },
+                                contentDescription = "Sort albums",
+                                onSelect = onAlbumSortChange
+                            )
                         }
                     )
-                    AlbumGrid(albums = albums, onAlbumClick = { onOpenAlbum(it.id) })
+                    AlbumGrid(
+                        albums = albums,
+                        gridState = albumListGridState,
+                        onAlbumClick = { onOpenAlbum(it.id) }
+                    )
                 }
 
                 selectedTab == TAB_SEARCH -> {
@@ -194,10 +223,19 @@ fun GalleryGridScreen(
                 else -> {
                     OneUIHeader(
                         title = "Pictures",
-                        subtitle = itemCountLabel(mediaItems.size)
+                        subtitle = itemCountLabel(sortedAllItems.size),
+                        trailing = {
+                            SortMenu(
+                                current = mediaSort,
+                                options = MediaSort.entries,
+                                label = { it.label },
+                                contentDescription = "Sort photos and videos",
+                                onSelect = onMediaSortChange
+                            )
+                        }
                     )
                     MediaGrid(
-                        mediaItems = mediaItems,
+                        mediaItems = sortedAllItems,
                         columnCount = columnCount,
                         onColumnCountChange = onColumnCountChange,
                         gridState = picturesGridState,
@@ -242,6 +280,7 @@ private fun androidx.compose.foundation.layout.RowScope.GalleryTab(
 @Composable
 private fun AlbumGrid(
     albums: List<Album>,
+    gridState: LazyGridState,
     onAlbumClick: (Album) -> Unit
 ) {
     if (albums.isEmpty()) {
@@ -250,6 +289,7 @@ private fun AlbumGrid(
     }
 
     LazyVerticalGrid(
+        state = gridState,
         columns = GridCells.Fixed(2),
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -433,9 +473,12 @@ private fun OneUIHeader(
 }
 
 @Composable
-private fun AlbumSortMenu(
-    current: AlbumSort,
-    onSelect: (AlbumSort) -> Unit
+private fun <T> SortMenu(
+    current: T,
+    options: List<T>,
+    label: (T) -> String,
+    contentDescription: String,
+    onSelect: (T) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
 
@@ -443,7 +486,7 @@ private fun AlbumSortMenu(
         IconButton(onClick = { expanded = true }) {
             Icon(
                 imageVector = Icons.AutoMirrored.Rounded.Sort,
-                contentDescription = "Sort albums",
+                contentDescription = contentDescription,
                 tint = DarkTextPrimary
             )
         }
@@ -452,7 +495,7 @@ private fun AlbumSortMenu(
             onDismissRequest = { expanded = false },
             containerColor = DarkSurface
         ) {
-            AlbumSort.entries.forEach { option ->
+            options.forEach { option ->
                 DropdownMenuItem(
                     onClick = {
                         onSelect(option)
@@ -460,7 +503,7 @@ private fun AlbumSortMenu(
                     },
                     text = {
                         Text(
-                            text = option.label,
+                            text = label(option),
                             color = if (option == current) OneUIBlue else DarkTextPrimary,
                             fontSize = 15.sp,
                             fontWeight = if (option == current) FontWeight.SemiBold else FontWeight.Normal
