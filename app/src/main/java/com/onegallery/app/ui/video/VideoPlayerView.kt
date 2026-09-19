@@ -28,6 +28,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.VolumeOff
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Camera
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -85,6 +87,10 @@ import kotlinx.coroutines.launch
  * The controls share their visibility with the host screen's overlays ([controlsVisible]) and are
  * laid out inside [controlsPadding] so the host's top/bottom bars never cover them. Playback only
  * runs while [isActivePage] is true and the app is in the foreground.
+ *
+ * Sound is controlled by the host ([isMuted]) rather than per player, so the choice carries
+ * from one video to the next while the user pages through the viewer. Videos autoplay, so the
+ * host is expected to start muted.
  */
 @OptIn(UnstableApi::class)
 @Composable
@@ -95,6 +101,8 @@ fun VideoPlayerView(
     controlsVisible: Boolean = true,
     onControlsVisibleChange: (Boolean) -> Unit = {},
     controlsPadding: PaddingValues = PaddingValues(0.dp),
+    isMuted: Boolean = true,
+    onMutedChange: (Boolean) -> Unit = {},
     onSnapshotTaken: ((Bitmap) -> Unit)? = null
 ) {
     val context = LocalContext.current
@@ -157,6 +165,10 @@ fun VideoPlayerView(
         } else {
             exoPlayer.pause()
         }
+    }
+
+    LaunchedEffect(exoPlayer, isMuted) {
+        exoPlayer.volume = if (isMuted) 0f else 1f
     }
 
     // Never keep playing (or looping audio) from the background
@@ -420,6 +432,24 @@ fun VideoPlayerView(
                     color = Color.LightGray,
                     fontSize = 12.sp
                 )
+
+                IconButton(
+                    onClick = { onMutedChange(!isMuted) },
+                    modifier = Modifier
+                        .padding(start = 4.dp)
+                        .size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = if (isMuted) {
+                            Icons.AutoMirrored.Rounded.VolumeOff
+                        } else {
+                            Icons.AutoMirrored.Rounded.VolumeUp
+                        },
+                        contentDescription = if (isMuted) "Unmute" else "Mute",
+                        tint = Color.White,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
             }
         }
     }

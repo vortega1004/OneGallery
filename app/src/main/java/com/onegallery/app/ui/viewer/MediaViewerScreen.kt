@@ -49,6 +49,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -96,6 +97,9 @@ fun MediaViewerScreen(
     val coroutineScope = rememberCoroutineScope()
     var isOverlayVisible by remember { mutableStateOf(true) }
     var showDetailsSheet by remember { mutableStateOf(false) }
+    // Videos autoplay, so they start silent. Held here rather than in the player so unmuting
+    // once carries across every video in this viewer session.
+    var isVideoMuted by rememberSaveable { mutableStateOf(true) }
     val detailsSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     // The pager re-clamps its page only on the next measure pass, so when the library shrinks
@@ -140,7 +144,9 @@ fun MediaViewerScreen(
                     isActivePage = isActivePage,
                     controlsVisible = isOverlayVisible,
                     onControlsVisibleChange = { isOverlayVisible = it },
-                    controlsPadding = videoControlsPadding
+                    controlsPadding = videoControlsPadding,
+                    isMuted = isVideoMuted,
+                    onMutedChange = { isVideoMuted = it }
                 )
             } else {
                 // Zoomable image viewer
