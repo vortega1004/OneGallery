@@ -1,5 +1,6 @@
 package com.onegallery.app.ui.viewer
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animate
@@ -70,8 +71,10 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.util.lerp
 import coil3.compose.AsyncImage
 import com.onegallery.app.domain.MediaItem
+import com.onegallery.app.domain.MediaType
 import com.onegallery.app.ui.common.rememberFullSizeRequest
 import com.onegallery.app.ui.common.rememberThumbnailRequest
+import com.onegallery.app.ui.editor.PhotoEditorScreen
 import com.onegallery.app.ui.filmstrip.FilmStripInfinityViewer
 import com.onegallery.app.ui.video.VideoPlayerView
 import kotlinx.coroutines.delay
@@ -107,6 +110,14 @@ fun MediaViewerScreen(
     // Videos autoplay, so they start silent. Held here rather than in the player so unmuting
     // once carries across every video in this viewer session.
     var isVideoMuted by rememberSaveable { mutableStateOf(true) }
+
+    // The editor is an overlay on the viewer rather than a separate destination, so closing it
+    // lands back on the same photo with the pager untouched. The item is kept separately from
+    // the open flag so the editor still has something to draw while it animates out.
+    var isEditorOpen by remember { mutableStateOf(false) }
+    var editorItem by remember { mutableStateOf<MediaItem?>(null) }
+    // Composed after GalleryApp's handler, so while the editor is open back closes the editor
+    BackHandler(enabled = isEditorOpen) { isEditorOpen = false }
     val detailsSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     // The pager re-clamps its page only on the next measure pass, so when the library shrinks
@@ -278,11 +289,20 @@ fun MediaViewerScreen(
                             tint = Color.White
                         )
                     }
-                    IconButton(onClick = { /* Edit photo */ }) {
+                    // Stills only: video trimming and animated GIFs are out of scope for the
+                    // basic editor, so the button greys out instead of failing on tap
+                    val canEdit = currentItem.mediaType == MediaType.IMAGE
+                    IconButton(
+                        enabled = canEdit,
+                        onClick = {
+                            editorItem = currentItem
+                            isEditorOpen = true
+                        }
+                    ) {
                         Icon(
                             imageVector = Icons.Rounded.Edit,
                             contentDescription = "Edit",
-                            tint = Color.White
+                            tint = if (canEdit) Color.White else Color(0x61FFFFFF)
                         )
                     }
                     IconButton(onClick = { /* Toggle favorite */ }) {
@@ -300,6 +320,22 @@ fun MediaViewerScreen(
                         )
                     }
                 }
+            }
+        }
+
+        // Photo editor overlay
+        AnimatedVisibility(
+            visible = isEditorOpen,
+            enter = fadeIn() + slideInVertically { it / 8 },
+            exit = fadeOut() + slideOutVertically { it / 8 }
+        ) {
+            editorItem?.let { item ->
+                PhotoEditorScreen(
+                    mediaItem = item,
+                    onClose = { isEditorOpen = false },
+                    // The copy shows up in the grid/pager through the MediaStore observer
+                    onSaved = { isEditorOpen = false }
+                )
             }
         }
 
