@@ -163,6 +163,7 @@ app/src/main/
         ├── editor/PhotoEditorScreen.kt           # Editor UI: crop & rotate, adjust, save copy
         ├── filmstrip/FilmStripInfinityViewer.kt  # Compose filmstrip, 1:1 synced with the pager
         ├── video/VideoPlayerView.kt              # Media3 PlayerView + capture shutter UI
+        ├── video/GhostVideoControls.kt           # Ghost buttons, frame jog strip, frame-step math
         ├── video/VideoSnapshotManager.kt         # Dual-path frame extraction
         └── theme/{Color,Theme}.kt                # One UI palettes
 ```
@@ -334,7 +335,20 @@ Added by the `viewer-features` branch (none of it has ever run):
     the preview (orientation, crop, colour). Edit is greyed out on videos and GIFs. System back
     closes the editor, not the viewer.
 21. **Re-verify frame capture** (step 8) — its save path was refactored.
-22. `gradlew.bat test` → `PhotoEditStateTest` and `ExifDetailsTest` pass.
+22. `gradlew.bat test` → `PhotoEditStateTest`, `ExifDetailsTest` and `FrameStepTest` pass.
+23. **One-handed video controls (right thumb, Pixel 10 Pro XL).** Holding the phone in the
+    right hand only: the shutter is in the lower-right corner and reachable without shifting
+    grip; previous/next-frame sit just left of it; the jog strip is above them. There is **no**
+    play button in the middle of the video — play/pause is at the left end of the seek bar. The
+    controls are outlines with almost no fill; the picture is clearly visible through them.
+    *Supersedes step 6's "Capture sits below the top bar" and the §1 collision row's Capture
+    coordinates* — re-measure with `uiautomator dump`: jog strip, frame buttons + shutter and
+    the seek bar must all sit above the filmstrip and not overlap each other.
+24. **Frame precision.** Pause, tap next-frame: the picture advances by exactly one frame and
+    the time readout (now `m:ss.mmm` while paused) moves by one frame interval (33 ms at 30 fps).
+    Hold the button → it walks frames. Drag the jog strip slowly → one haptic tick and one frame
+    per ~12 dp, right = forward; the pager must not swipe while dragging it. Capture while
+    stepped → the saved still is the frame on screen. Try a 60 fps and a slow-motion clip.
 
 ---
 
@@ -540,6 +554,15 @@ then §5 steps 13–22 on the Pixel. **Adds `junit:4.13.2` — first build needs
    reflow, animated double-tap zoom, thumbnail placeholder → full-res crossfade with the
    full decode deferred until a page is active (§6.15, unmeasured). Also fixes folders opening
    at the previous folder's scroll offset (one `LazyGridState` serves every album).
+6. **One-handed ghost video controls + frame-accurate stepping** (owner request after using
+   the Pixel one-handed). Shutter moved from top-left to the lower-right corner; the centre
+   play button is gone and play/pause sits at the left end of the seek bar; new previous /
+   next-frame buttons (hold to repeat) and a jog strip where drag distance maps to *frames*
+   rather than to a fraction of the video. All controls are outline-only and clustered
+   lower-right. `frameStepPositionMs` rounds the seek target **down** — ExoPlayer's exact seek
+   shows the first frame at-or-after the position, so rounding up lands one frame late; checked
+   against a model at 24–240 fps (`FrameStepTest`). Assumes constant frame rate; on
+   variable-rate phone footage a step can occasionally be 0 or 2 frames.
 5. `ea5d63a` **Basic photo editor** (§4, §6.4) plus the project's first unit tests. The
    transform reduction was checked against a brute-force pixel model before commit — the same
    model is `PhotoEditStateTest`. `MediaStoreRepository`'s insert/pending/EXIF/publish/cleanup
