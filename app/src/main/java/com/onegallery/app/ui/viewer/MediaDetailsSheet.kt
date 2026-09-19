@@ -17,19 +17,21 @@ import androidx.compose.material.icons.rounded.CalendarToday
 import androidx.compose.material.icons.rounded.CameraAlt
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Image
-import androidx.compose.material.icons.rounded.Info
-import androidx.compose.material3.Divider
+import androidx.compose.material.icons.rounded.Place
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SheetState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -45,6 +47,10 @@ import java.util.Locale
 /**
  * Replicates Samsung Gallery's signature Swipe-Up Details Sheet:
  * Shows rich EXIF, camera aperture, shutter speed, ISO, resolution, file size, and storage path.
+ *
+ * MediaStore fields render immediately; the EXIF rows (camera, exposure, location) are read
+ * from the file off the main thread and appear when ready. Location only shows when the user
+ * granted ACCESS_MEDIA_LOCATION — without it MediaStore hands back a redacted file.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -65,6 +71,11 @@ fun MediaDetailsSheet(
                 .padding(horizontal = 24.dp)
                 .padding(bottom = 36.dp)
         ) {
+            val context = LocalContext.current
+            val exif by produceState<ExifDetails?>(initialValue = null, mediaItem.uri) {
+                value = if (mediaItem.isVideo) null else readExifDetails(context, mediaItem.uri)
+            }
+
             // Drag handle / Title
             Text(
                 text = "Details",
@@ -97,6 +108,24 @@ fun MediaDetailsSheet(
                 title = mediaItem.bucketName,
                 value = mediaItem.path
             )
+
+            // Camera & exposure (EXIF)
+            exif?.let { details ->
+                if (details.camera != null || details.exposure != null) {
+                    DetailRow(
+                        icon = Icons.Rounded.CameraAlt,
+                        title = details.camera ?: "Camera",
+                        value = details.exposure ?: "No exposure data"
+                    )
+                }
+                details.location?.let { location ->
+                    DetailRow(
+                        icon = Icons.Rounded.Place,
+                        title = "Location",
+                        value = location
+                    )
+                }
+            }
 
             // Camera / Tech Specs (Samsung style card)
             Box(

@@ -60,7 +60,15 @@ app/src/main/java/com/onegallery/app/
 │   │   └── VideoSnapshotManager.kt    # Dual-path frame extraction and EXIF background saver
 │   ├── viewer/
 │   │   ├── MediaViewerScreen.kt       # Fullscreen zoomable pager synchronized with FilmStrip
-│   │   └── MediaDetailsSheet.kt       # One UI swipe-up EXIF and technical info sheet
+│   │   ├── MediaDetailsSheet.kt       # One UI swipe-up EXIF and technical info sheet
+│   │   ├── ExifDetails.kt             # EXIF reader (camera, exposure, GPS) for the sheet
+│   │   └── SwipeUpGesture.kt          # Non-consuming swipe-up detector
+│   ├── editor/
+│   │   ├── PhotoEditorScreen.kt       # Basic editor: crop & rotate, adjust, save a copy
+│   │   ├── PhotoEditState.kt          # Pure edit state + transform/crop/colour math
+│   │   └── PhotoEditRenderer.kt       # Applies an edit to a bitmap
+│   ├── common/
+│   │   └── MediaImageRequests.kt      # Shared Coil requests (thumbnail stand-in / full-size)
 │   ├── grid/
 │   │   └── GalleryGridScreen.kt       # Pinch-to-zoom 1-5 column grid with sticky date headers
 │   └── theme/

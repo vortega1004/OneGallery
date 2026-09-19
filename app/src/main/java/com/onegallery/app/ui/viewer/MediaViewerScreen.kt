@@ -1,6 +1,10 @@
 package com.onegallery.app.ui.viewer
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -49,6 +53,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -63,23 +68,29 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.util.lerp
 import coil3.compose.AsyncImage
 import com.onegallery.app.domain.MediaItem
+import com.onegallery.app.domain.MediaType
+import com.onegallery.app.ui.common.rememberFullSizeRequest
+import com.onegallery.app.ui.common.rememberThumbnailRequest
+import com.onegallery.app.ui.editor.PhotoEditorScreen
 import com.onegallery.app.ui.filmstrip.FilmStripInfinityViewer
 import com.onegallery.app.ui.video.VideoPlayerView
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
 
-@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
-@Composable
 /**
  * @param onVisibleItemChange reports the id of the item currently on screen, so the caller can
  *   restore the grid to it on exit. Reported continuously rather than on back, because back can
  *   arrive as a gesture, a system key or the toolbar button.
  */
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
+@Composable
 fun MediaViewerScreen(
     mediaItems: List<MediaItem>,
     initialIndex: Int,
@@ -96,6 +107,17 @@ fun MediaViewerScreen(
     val coroutineScope = rememberCoroutineScope()
     var isOverlayVisible by remember { mutableStateOf(true) }
     var showDetailsSheet by remember { mutableStateOf(false) }
+    // Videos autoplay, so they start silent. Held here rather than in the player so unmuting
+    // once carries across every video in this viewer session.
+    var isVideoMuted by rememberSaveable { mutableStateOf(true) }
+
+    // The editor is an overlay on the viewer rather than a separate destination, so closing it
+    // lands back on the same photo with the pager untouched. The item is kept separately from
+    // the open flag so the editor still has something to draw while it animates out.
+    var isEditorOpen by remember { mutableStateOf(false) }
+    var editorItem by remember { mutableStateOf<MediaItem?>(null) }
+    // Composed after GalleryApp's handler, so while the editor is open back closes the editor
+    BackHandler(enabled = isEditorOpen) { isEditorOpen = false }
     val detailsSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     // The pager re-clamps its page only on the next measure pass, so when the library shrinks
@@ -136,18 +158,23 @@ fun MediaViewerScreen(
                 // Video controls share the viewer's overlay visibility, so one tap hides/shows both
                 VideoPlayerView(
                     mediaItem = item,
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .swipeUpToReveal { showDetailsSheet = true },
                     isActivePage = isActivePage,
                     controlsVisible = isOverlayVisible,
                     onControlsVisibleChange = { isOverlayVisible = it },
-                    controlsPadding = videoControlsPadding
+                    controlsPadding = videoControlsPadding,
+                    isMuted = isVideoMuted,
+                    onMutedChange = { isVideoMuted = it }
                 )
             } else {
                 // Zoomable image viewer
                 ZoomableImageView(
                     mediaItem = item,
                     isActivePage = isActivePage,
-                    onTap = { isOverlayVisible = !isOverlayVisible }
+                    onTap = { isOverlayVisible = !isOverlayVisible },
+                    onSwipeUp = { showDetailsSheet = true }
                 )
             }
         }
@@ -262,11 +289,20 @@ fun MediaViewerScreen(
                             tint = Color.White
                         )
                     }
-                    IconButton(onClick = { /* Edit photo */ }) {
+                    // Stills only: video trimming and animated GIFs are out of scope for the
+                    // basic editor, so the button greys out instead of failing on tap
+                    val canEdit = currentItem.mediaType == MediaType.IMAGE
+                    IconButton(
+                        enabled = canEdit,
+                        onClick = {
+                            editorItem = currentItem
+                            isEditorOpen = true
+                        }
+                    ) {
                         Icon(
                             imageVector = Icons.Rounded.Edit,
                             contentDescription = "Edit",
-                            tint = Color.White
+                            tint = if (canEdit) Color.White else Color(0x61FFFFFF)
                         )
                     }
                     IconButton(onClick = { /* Toggle favorite */ }) {
@@ -287,6 +323,22 @@ fun MediaViewerScreen(
             }
         }
 
+        // Photo editor overlay
+        AnimatedVisibility(
+            visible = isEditorOpen,
+            enter = fadeIn() + slideInVertically { it / 8 },
+            exit = fadeOut() + slideOutVertically { it / 8 }
+        ) {
+            editorItem?.let { item ->
+                PhotoEditorScreen(
+                    mediaItem = item,
+                    onClose = { isEditorOpen = false },
+                    // The copy shows up in the grid/pager through the MediaStore observer
+                    onSaved = { isEditorOpen = false }
+                )
+            }
+        }
+
         // Swipe-up / Info Sheet
         if (showDetailsSheet) {
             MediaDetailsSheet(
@@ -302,11 +354,27 @@ fun MediaViewerScreen(
 private fun ZoomableImageView(
     mediaItem: MediaItem,
     isActivePage: Boolean,
-    onTap: () -> Unit
+    onTap: () -> Unit,
+    onSwipeUp: () -> Unit
 ) {
     var scale by remember { mutableFloatStateOf(1f) }
     var offsetX by remember { mutableFloatStateOf(0f) }
     var offsetY by remember { mutableFloatStateOf(0f) }
+    val zoomScope = rememberCoroutineScope()
+
+    // A page shows the (usually already cached) thumbnail first and only asks for the
+    // full-resolution decode once it has been the active page for a moment. Pages merely passed
+    // while scrubbing the filmstrip, or peeking in during a swipe, never start a 12 MP decode.
+    // Once upgraded a page stays upgraded, so flicking back to it doesn't re-blur.
+    var loadFullRes by remember { mutableStateOf(false) }
+    LaunchedEffect(isActivePage) {
+        if (isActivePage && !loadFullRes) {
+            delay(FULL_RES_DELAY_MS)
+            loadFullRes = true
+        }
+    }
+    val thumbnailRequest = rememberThumbnailRequest(mediaItem.uri)
+    val fullSizeRequest = rememberFullSizeRequest(mediaItem.uri)
 
     // Swiping away from a zoomed photo shouldn't leave it zoomed when the user comes back
     LaunchedEffect(isActivePage) {
@@ -320,13 +388,30 @@ private fun ZoomableImageView(
     Box(
         modifier = Modifier
             .fillMaxSize()
+            // Swipe up opens the details sheet. Only at 1x: once zoomed, a vertical drag pans
+            // the photo (and at the photo's edge it should do nothing, not pop a sheet).
+            // First in the chain = outermost = sees each event after the zoom loop below has
+            // had its chance to consume it.
+            .swipeUpToReveal(enabled = scale == 1f, onSwipeUp = onSwipeUp)
             .pointerInput(Unit) {
                 detectTapGestures(
                     onTap = { onTap() },
                     onDoubleTap = {
-                        scale = if (scale > 1.2f) 1f else 2.5f
-                        offsetX = 0f
-                        offsetY = 0f
+                        val startScale = scale
+                        val startX = offsetX
+                        val startY = offsetY
+                        val targetScale = if (scale > 1.2f) 1f else 2.5f
+                        zoomScope.launch {
+                            animate(
+                                initialValue = 0f,
+                                targetValue = 1f,
+                                animationSpec = tween(DOUBLE_TAP_ZOOM_MS, easing = FastOutSlowInEasing)
+                            ) { fraction, _ ->
+                                scale = lerp(startScale, targetScale, fraction)
+                                offsetX = lerp(startX, 0f, fraction)
+                                offsetY = lerp(startY, 0f, fraction)
+                            }
+                        }
                     }
                 )
             }
@@ -389,7 +474,7 @@ private fun ZoomableImageView(
         contentAlignment = Alignment.Center
     ) {
         AsyncImage(
-            model = mediaItem.uri,
+            model = if (loadFullRes) fullSizeRequest else thumbnailRequest,
             contentDescription = mediaItem.displayName,
             contentScale = ContentScale.Fit,
             modifier = Modifier
@@ -403,3 +488,6 @@ private fun ZoomableImageView(
         )
     }
 }
+
+private const val FULL_RES_DELAY_MS = 120L
+private const val DOUBLE_TAP_ZOOM_MS = 220

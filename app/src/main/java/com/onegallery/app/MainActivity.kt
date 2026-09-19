@@ -15,6 +15,13 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -216,60 +223,93 @@ fun GalleryApp(viewModel: GalleryViewModel) {
         // they opened if they paged or scrubbed the filmstrip.
         restoreToItemId = viewerVisibleItemId
         selectedItemIndex = -1
-        viewerAlbumId = null
+        // viewerAlbumId is deliberately NOT cleared: the viewer stays composed while it
+        // animates out, and clearing it would swap the pager's list (and the photo on screen)
+        // mid-fade. It is overwritten on every open, so a stale value is never read.
         viewerVisibleItemId = null
     }
 
     // System back / back gesture returns to the grid instead of leaving the app
     BackHandler(enabled = selectedItemIndex >= 0) { closeViewer() }
 
-    if (selectedItemIndex >= 0 && viewerItems.isNotEmpty()) {
-        MediaViewerScreen(
-            mediaItems = viewerItems,
-            initialIndex = selectedItemIndex,
-            onBack = closeViewer,
-            onVisibleItemChange = { viewerVisibleItemId = it }
-        )
-    } else {
-        GalleryGridScreen(
-            mediaItems = mediaItems,
-            selectedTab = selectedTab,
-            onTabChange = { selectedTab = it },
-            openedAlbumId = openedAlbumId,
-            onOpenAlbum = { openedAlbumId = it },
-            columnCount = columnCount,
-            onColumnCountChange = { columnCount = it },
-            picturesGridState = picturesGridState,
-            albumGridState = albumGridState,
-            restoreToItemId = restoreToItemId,
-            onRestoreHandled = { restoreToItemId = null },
-            albumListGridState = albumListGridState,
-            albumSort = albumSort,
-            // Changing the sort must jump back to the top. LazyGrid keys are stable, so it
-            // otherwise anchors whatever item was first visible and follows it to its new
-            // position — picking "Name (Z-A)" would leave you in the middle of the list.
-            // Done here as an explicit event rather than a LaunchedEffect on the sort value,
-            // which would also fire when returning from the viewer and fight the
-            // restore-to-item scroll.
-            onAlbumSortChange = {
-                albumSort = it
-                scope.launch { albumListGridState.scrollToTopAfterReorder() }
-            },
-            mediaSort = mediaSort,
-            onMediaSortChange = {
-                mediaSort = it
-                scope.launch {
-                    picturesGridState.scrollToTopAfterReorder()
-                    albumGridState.scrollToTopAfterReorder()
-                }
-            },
-            onItemClick = { albumId, index ->
-                viewerAlbumId = albumId
-                selectedItemIndex = index
+    // The viewer still *replaces* the grid (grid state stays hoisted above, see the notes at
+    // the top of this function); AnimatedContent only overlaps the two for the ~200 ms of the
+    // transition instead of cutting between them.
+    AnimatedContent(
+        targetState = selectedItemIndex >= 0 && viewerItems.isNotEmpty(),
+        transitionSpec = {
+            if (targetState) {
+                // Opening: the photo grows out of the grid
+                (fadeIn(tween(VIEWER_ENTER_MS)) + scaleIn(tween(VIEWER_ENTER_MS), initialScale = 0.92f))
+                    .togetherWith(fadeOut(tween(VIEWER_ENTER_MS)))
+            } else {
+                // Closing: the photo shrinks back while the grid fades in underneath
+                fadeIn(tween(VIEWER_EXIT_MS))
+                    .togetherWith(fadeOut(tween(VIEWER_EXIT_MS)) + scaleOut(tween(VIEWER_EXIT_MS), targetScale = 0.92f))
+                    .apply { targetContentZIndex = -1f }
             }
-        )
+        },
+        label = "grid-viewer"
+    ) { showViewer ->
+        if (showViewer) {
+            MediaViewerScreen(
+                mediaItems = viewerItems,
+                initialIndex = selectedItemIndex,
+                onBack = closeViewer,
+                onVisibleItemChange = { viewerVisibleItemId = it }
+            )
+        } else {
+            GalleryGridScreen(
+                mediaItems = mediaItems,
+                selectedTab = selectedTab,
+                onTabChange = { selectedTab = it },
+                openedAlbumId = openedAlbumId,
+                onOpenAlbum = { albumId ->
+                    // One LazyGridState serves every album, so without this a folder opens at
+                    // whatever scroll offset the previous folder was left at. Returning from
+                    // the viewer does not come through here, so that restore is unaffected.
+                    if (albumId != null && albumId != openedAlbumId) {
+                        scope.launch { albumGridState.scrollToItem(0) }
+                    }
+                    openedAlbumId = albumId
+                },
+                columnCount = columnCount,
+                onColumnCountChange = { columnCount = it },
+                picturesGridState = picturesGridState,
+                albumGridState = albumGridState,
+                restoreToItemId = restoreToItemId,
+                onRestoreHandled = { restoreToItemId = null },
+                albumListGridState = albumListGridState,
+                albumSort = albumSort,
+                // Changing the sort must jump back to the top. LazyGrid keys are stable, so it
+                // otherwise anchors whatever item was first visible and follows it to its new
+                // position — picking "Name (Z-A)" would leave you in the middle of the list.
+                // Done here as an explicit event rather than a LaunchedEffect on the sort value,
+                // which would also fire when returning from the viewer and fight the
+                // restore-to-item scroll.
+                onAlbumSortChange = {
+                    albumSort = it
+                    scope.launch { albumListGridState.scrollToTopAfterReorder() }
+                },
+                mediaSort = mediaSort,
+                onMediaSortChange = {
+                    mediaSort = it
+                    scope.launch {
+                        picturesGridState.scrollToTopAfterReorder()
+                        albumGridState.scrollToTopAfterReorder()
+                    }
+                },
+                onItemClick = { albumId, index ->
+                    viewerAlbumId = albumId
+                    selectedItemIndex = index
+                }
+            )
+        }
     }
 }
+
+private const val VIEWER_ENTER_MS = 220
+private const val VIEWER_EXIT_MS = 200
 
 @Composable
 fun PermissionRequestScreen(

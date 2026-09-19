@@ -1,6 +1,13 @@
 package com.onegallery.app.ui.grid
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -47,6 +54,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -114,11 +122,6 @@ fun GalleryGridScreen(
     val openedAlbum = remember(albums, openedAlbumId) {
         albums.firstOrNull { it.id == openedAlbumId }
     }
-    // Same expression the viewer uses to build its pager list — see MediaItem.forAlbum.
-    val albumItems = remember(mediaItems, openedAlbumId, mediaSort) {
-        if (openedAlbumId == null) emptyList()
-        else mediaItems.forAlbum(openedAlbumId).sortedBy(mediaSort)
-    }
     val sortedAllItems = remember(mediaItems, mediaSort) {
         mediaItems.forAlbum(null).sortedBy(mediaSort)
     }
@@ -162,92 +165,134 @@ fun GalleryGridScreen(
             }
         }
     ) { innerPadding ->
-        Column(
+        // Tab switches fade; drilling into / out of an album also slides, in the direction of
+        // travel. contentKey keeps a live MediaStore update (which changes the Album object's
+        // counts) from being mistaken for a navigation and re-running the transition.
+        AnimatedContent(
+            targetState = GridDestination(
+                tab = selectedTab,
+                album = if (selectedTab == TAB_ALBUMS) openedAlbum else null
+            ),
+            contentKey = { it.key },
+            transitionSpec = {
+                val direction = when {
+                    targetState.album != null && initialState.album == null -> 1
+                    targetState.album == null && initialState.album != null -> -1
+                    else -> 0
+                }
+                (fadeIn(tween(DESTINATION_ENTER_MS)) +
+                    slideInHorizontally(tween(DESTINATION_ENTER_MS)) { direction * it / 8 })
+                    .togetherWith(
+                        fadeOut(tween(DESTINATION_EXIT_MS)) +
+                            slideOutHorizontally(tween(DESTINATION_EXIT_MS)) { -direction * it / 8 }
+                    )
+            },
+            label = "grid-destination",
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-        ) {
-            when {
-                selectedTab == TAB_ALBUMS && openedAlbum != null -> {
-                    OneUIHeader(
-                        title = openedAlbum.name,
-                        subtitle = itemCountLabel(albumItems.size),
-                        onBack = { onOpenAlbum(null) },
-                        trailing = {
-                            SortMenu(
-                                current = mediaSort,
-                                options = MediaSort.entries,
-                                label = { it.label },
-                                contentDescription = "Sort photos and videos",
-                                onSelect = onMediaSortChange
-                            )
-                        }
-                    )
-                    MediaGrid(
-                        mediaItems = albumItems,
-                        columnCount = columnCount,
-                        onColumnCountChange = onColumnCountChange,
-                        gridState = albumGridState,
-                        restoreToItemId = restoreToItemId,
-                        onRestoreHandled = onRestoreHandled,
-                        onItemClick = { index -> onItemClick(openedAlbum.id, index) }
-                    )
-                }
+        ) { destination ->
+            val album = destination.album
 
-                selectedTab == TAB_ALBUMS -> {
-                    OneUIHeader(
-                        title = "Albums",
-                        subtitle = albumCountLabel(albums.size, mediaItems.size),
-                        trailing = {
-                            SortMenu(
-                                current = albumSort,
-                                options = AlbumSort.entries,
-                                label = { it.label },
-                                contentDescription = "Sort albums",
-                                onSelect = onAlbumSortChange
-                            )
+            Column(modifier = Modifier.fillMaxSize()) {
+                when {
+                    album != null -> {
+                        // Built from the *destination's* album, not openedAlbumId: this block
+                        // stays composed while it animates out, by which time openedAlbumId is
+                        // already null and the grid would flash empty.
+                        // Same expression the viewer uses to build its pager list — see
+                        // MediaItem.forAlbum.
+                        val albumItems = remember(mediaItems, album.id, mediaSort) {
+                            mediaItems.forAlbum(album.id).sortedBy(mediaSort)
                         }
-                    )
-                    AlbumGrid(
-                        albums = albums,
-                        gridState = albumListGridState,
-                        onAlbumClick = { onOpenAlbum(it.id) }
-                    )
-                }
+                        OneUIHeader(
+                            title = album.name,
+                            subtitle = itemCountLabel(albumItems.size),
+                            onBack = { onOpenAlbum(null) },
+                            trailing = {
+                                SortMenu(
+                                    current = mediaSort,
+                                    options = MediaSort.entries,
+                                    label = { it.label },
+                                    contentDescription = "Sort photos and videos",
+                                    onSelect = onMediaSortChange
+                                )
+                            }
+                        )
+                        MediaGrid(
+                            mediaItems = albumItems,
+                            columnCount = columnCount,
+                            onColumnCountChange = onColumnCountChange,
+                            gridState = albumGridState,
+                            restoreToItemId = restoreToItemId,
+                            onRestoreHandled = onRestoreHandled,
+                            onItemClick = { index -> onItemClick(album.id, index) }
+                        )
+                    }
 
-                selectedTab == TAB_SEARCH -> {
-                    OneUIHeader(title = "Search", subtitle = "Not implemented yet")
-                    EmptyState("Search hasn't been built yet.")
-                }
+                    destination.tab == TAB_ALBUMS -> {
+                        OneUIHeader(
+                            title = "Albums",
+                            subtitle = albumCountLabel(albums.size, mediaItems.size),
+                            trailing = {
+                                SortMenu(
+                                    current = albumSort,
+                                    options = AlbumSort.entries,
+                                    label = { it.label },
+                                    contentDescription = "Sort albums",
+                                    onSelect = onAlbumSortChange
+                                )
+                            }
+                        )
+                        AlbumGrid(
+                            albums = albums,
+                            gridState = albumListGridState,
+                            onAlbumClick = { onOpenAlbum(it.id) }
+                        )
+                    }
 
-                else -> {
-                    OneUIHeader(
-                        title = "Pictures",
-                        subtitle = itemCountLabel(sortedAllItems.size),
-                        trailing = {
-                            SortMenu(
-                                current = mediaSort,
-                                options = MediaSort.entries,
-                                label = { it.label },
-                                contentDescription = "Sort photos and videos",
-                                onSelect = onMediaSortChange
-                            )
-                        }
-                    )
-                    MediaGrid(
-                        mediaItems = sortedAllItems,
-                        columnCount = columnCount,
-                        onColumnCountChange = onColumnCountChange,
-                        gridState = picturesGridState,
-                        restoreToItemId = restoreToItemId,
-                        onRestoreHandled = onRestoreHandled,
-                        onItemClick = { index -> onItemClick(null, index) }
-                    )
+                    destination.tab == TAB_SEARCH -> {
+                        OneUIHeader(title = "Search", subtitle = "Not implemented yet")
+                        EmptyState("Search hasn't been built yet.")
+                    }
+
+                    else -> {
+                        OneUIHeader(
+                            title = "Pictures",
+                            subtitle = itemCountLabel(sortedAllItems.size),
+                            trailing = {
+                                SortMenu(
+                                    current = mediaSort,
+                                    options = MediaSort.entries,
+                                    label = { it.label },
+                                    contentDescription = "Sort photos and videos",
+                                    onSelect = onMediaSortChange
+                                )
+                            }
+                        )
+                        MediaGrid(
+                            mediaItems = sortedAllItems,
+                            columnCount = columnCount,
+                            onColumnCountChange = onColumnCountChange,
+                            gridState = picturesGridState,
+                            restoreToItemId = restoreToItemId,
+                            onRestoreHandled = onRestoreHandled,
+                            onItemClick = { index -> onItemClick(null, index) }
+                        )
+                    }
                 }
             }
         }
     }
 }
+
+/** Where the grid screen is; [album] is only set while inside a folder on the Albums tab. */
+private data class GridDestination(val tab: Int, val album: Album?) {
+    val key: String get() = if (album != null) "album:${album.id}" else "tab:$tab"
+}
+
+private const val DESTINATION_ENTER_MS = 200
+private const val DESTINATION_EXIT_MS = 140
 
 private fun itemCountLabel(count: Int): String =
     if (count == 1) "1 item" else "$count items"
@@ -378,6 +423,9 @@ private fun MediaGrid(
         onRestoreHandled()
     }
 
+    val latestColumnCount by rememberUpdatedState(columnCount)
+    val latestOnColumnCountChange by rememberUpdatedState(onColumnCountChange)
+
     LazyVerticalGrid(
         state = gridState,
         columns = GridCells.Fixed(columnCount),
@@ -386,10 +434,15 @@ private fun MediaGrid(
         verticalArrangement = Arrangement.spacedBy(2.dp),
         modifier = Modifier
             .fillMaxSize()
-            .pointerInput(columnCount) {
+            .pointerInput(Unit) {
                 // Runs in the Initial pass so a two-finger pinch is claimed before the grid's
                 // own scrolling sees (and consumes) it. Zoom deltas arrive per event (each
                 // ~1.0), so they are accumulated across the gesture.
+                //
+                // Keyed on Unit, reading the column count through rememberUpdatedState: keying
+                // on columnCount restarted this block on the first step of a pinch, and the
+                // restarted block waits for a fresh finger-down — so the rest of that pinch
+                // was no longer consumed and leaked into the grid as a two-finger scroll.
                 awaitEachGesture {
                     var cumulativeZoom = 1f
                     awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
@@ -398,10 +451,10 @@ private fun MediaGrid(
                         if (event.changes.count { it.pressed } >= 2) {
                             cumulativeZoom *= event.calculateZoom()
                             if (cumulativeZoom > 1.25f) {
-                                if (columnCount > 1) onColumnCountChange(columnCount - 1)
+                                if (latestColumnCount > 1) latestOnColumnCountChange(latestColumnCount - 1)
                                 cumulativeZoom = 1f
                             } else if (cumulativeZoom < 0.8f) {
-                                if (columnCount < 5) onColumnCountChange(columnCount + 1)
+                                if (latestColumnCount < 5) latestOnColumnCountChange(latestColumnCount + 1)
                                 cumulativeZoom = 1f
                             }
                             event.changes.forEach {
@@ -418,7 +471,10 @@ private fun MediaGrid(
         ) { index, item ->
             MediaGridCell(
                 mediaItem = item,
-                onClick = { onItemClick(index) }
+                onClick = { onItemClick(index) },
+                // Cells glide to their new slot when the column count or sort changes, and
+                // fade when MediaStore adds/removes an item, instead of the grid snapping.
+                modifier = Modifier.animateItem()
             )
         }
     }
@@ -531,10 +587,11 @@ private fun <T> SortMenu(
 @Composable
 private fun MediaGridCell(
     mediaItem: MediaItem,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     Box(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .aspectRatio(1f)
             .background(Color(0xFF1F2125))

@@ -296,35 +296,85 @@ class MediaStoreRepository(private val context: Context) {
             System.currentTimeMillis()
         }
 
+        insertJpeg(
+            fileName = fileName,
+            relativeDir = relativeSubDir,
+            dateTakenMs = frameTimeMs,
+            bitmap = bitmap,
+            quality = 98
+        ) { uri ->
+            writeSnapshotExif(uri, sourceVideo, playbackPositionMs, frameTimeMs)
+        }
+    }
+
+    /**
+     * Saves an edited photo as a **new** file in `Pictures/OneGallery_Edits`. The original is
+     * never touched: overwriting another app's file needs a per-file user consent dialog under
+     * scoped storage, and a copy is also what makes the edit undoable.
+     *
+     * Dated like the original so the copy sorts next to it rather than at the top of the grid.
+     */
+    suspend fun saveEditedImage(
+        bitmap: Bitmap,
+        source: MediaItem
+    ): Uri? = withContext(Dispatchers.IO) {
+        val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val baseName = source.displayName.substringBeforeLast('.').ifEmpty { "Photo" }
+        val dateTakenMs = if (source.dateTaken > 0) source.dateTaken else System.currentTimeMillis()
+
+        insertJpeg(
+            fileName = "${baseName}_edited_$timeStamp.jpg",
+            relativeDir = "${Environment.DIRECTORY_PICTURES}/OneGallery_Edits",
+            dateTakenMs = dateTakenMs,
+            bitmap = bitmap,
+            quality = 95
+        ) { uri ->
+            writeEditedExif(uri, source, dateTakenMs)
+        }
+    }
+
+    /**
+     * One MediaStore insert transaction: pending row -> JPEG bytes -> EXIF -> publish.
+     * EXIF is written while the row is still pending so observers see one finished file, and a
+     * failure anywhere deletes the row instead of leaving an orphaned pending entry.
+     */
+    private fun insertJpeg(
+        fileName: String,
+        relativeDir: String,
+        dateTakenMs: Long,
+        bitmap: Bitmap,
+        quality: Int,
+        writeExif: (Uri) -> Unit
+    ): Uri? {
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-            put(MediaStore.Images.Media.DATE_TAKEN, frameTimeMs)
-            put(MediaStore.Images.Media.RELATIVE_PATH, relativeSubDir)
+            put(MediaStore.Images.Media.DATE_TAKEN, dateTakenMs)
+            put(MediaStore.Images.Media.RELATIVE_PATH, relativeDir)
             put(MediaStore.Images.Media.IS_PENDING, 1)
         }
 
         var uri: Uri? = null
-        try {
-            uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-                ?: return@withContext null
+        return try {
+            val inserted = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                ?: return null
+            uri = inserted
 
-            val outputStream = contentResolver.openOutputStream(uri)
-                ?: throw IOException("Unable to open $uri for writing")
+            val outputStream = contentResolver.openOutputStream(inserted)
+                ?: throw IOException("Unable to open $inserted for writing")
             outputStream.use {
-                if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 98, it)) {
+                if (!bitmap.compress(Bitmap.CompressFormat.JPEG, quality, it)) {
                     throw IOException("JPEG encoding failed")
                 }
             }
 
-            // EXIF is written while the row is still pending so observers see one finished file
-            writeSnapshotExif(uri, sourceVideo, playbackPositionMs, frameTimeMs)
+            writeExif(inserted)
 
             values.clear()
             values.put(MediaStore.Images.Media.IS_PENDING, 0)
-            contentResolver.update(uri, values, null, null)
+            contentResolver.update(inserted, values, null, null)
 
-            uri
+            inserted
         } catch (e: Exception) {
             e.printStackTrace()
             // Don't leave an orphaned pending row behind
@@ -334,6 +384,40 @@ class MediaStoreRepository(private val context: Context) {
                 } catch (_: Exception) {}
             }
             null
+        }
+    }
+
+    /**
+     * Carries the original's camera metadata over to the edited copy. Orientation is
+     * deliberately left out: the pixels were already rotated upright before editing.
+     */
+    private fun writeEditedExif(uri: Uri, source: MediaItem, dateTakenMs: Long) {
+        try {
+            val sourceExif = try {
+                contentResolver.openInputStream(source.uri)?.use { ExifInterface(it) }
+            } catch (_: Exception) {
+                null
+            }
+
+            contentResolver.openFileDescriptor(uri, "rw")?.use { pfd ->
+                val destExif = ExifInterface(pfd.fileDescriptor)
+                sourceExif?.let { original ->
+                    COPIED_EXIF_TAGS.forEach { tag ->
+                        original.getAttribute(tag)?.let { destExif.setAttribute(tag, it) }
+                    }
+                    original.latLong?.let { (latitude, longitude) ->
+                        destExif.setLatLong(latitude, longitude)
+                    }
+                }
+                if (destExif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL) == null) {
+                    val exifDate = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US).format(Date(dateTakenMs))
+                    destExif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, exifDate)
+                }
+                destExif.setAttribute(ExifInterface.TAG_SOFTWARE, "OneGallery")
+                destExif.saveAttributes()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
 
@@ -391,6 +475,20 @@ class MediaStoreRepository(private val context: Context) {
 
     private companion object {
         const val CHANGE_BURST_WINDOW_MS = 300L
+
+        val COPIED_EXIF_TAGS = listOf(
+            ExifInterface.TAG_MAKE,
+            ExifInterface.TAG_MODEL,
+            ExifInterface.TAG_DATETIME_ORIGINAL,
+            ExifInterface.TAG_OFFSET_TIME_ORIGINAL,
+            ExifInterface.TAG_F_NUMBER,
+            ExifInterface.TAG_EXPOSURE_TIME,
+            ExifInterface.TAG_PHOTOGRAPHIC_SENSITIVITY,
+            ExifInterface.TAG_FOCAL_LENGTH,
+            ExifInterface.TAG_FOCAL_LENGTH_IN_35MM_FILM,
+            ExifInterface.TAG_FLASH,
+            ExifInterface.TAG_WHITE_BALANCE
+        )
         val ISO_6709_PATTERN = Regex("""([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)""")
     }
 }

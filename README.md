@@ -59,7 +59,15 @@ gallery_clone/
 │           │   │   └── VideoSnapshotManager.kt    # Dual-path frame extraction & EXIF saver
 │           │   ├── viewer/
 │           │   │   ├── MediaViewerScreen.kt       # Fullscreen zoomable pager + synchronized filmstrip
-│           │   │   └── MediaDetailsSheet.kt       # Swipe-up EXIF and technical details sheet
+│           │   │   ├── MediaDetailsSheet.kt       # Swipe-up EXIF and technical details sheet
+│           │   │   ├── ExifDetails.kt             # EXIF reader for the details sheet
+│           │   │   └── SwipeUpGesture.kt          # Swipe-up detector that opens the sheet
+│           │   ├── editor/
+│           │   │   ├── PhotoEditorScreen.kt       # Crop & rotate, adjust, save-a-copy UI
+│           │   │   ├── PhotoEditState.kt          # Pure edit state + transform math (unit-tested)
+│           │   │   └── PhotoEditRenderer.kt       # Applies an edit to a bitmap
+│           │   ├── common/
+│           │   │   └── MediaImageRequests.kt      # Shared Coil requests (thumbnail / full-size)
 │           │   ├── grid/
 │           │   │   └── GalleryGridScreen.kt       # Responsive pinch-to-zoom 1-5 column grid
 │           │   └── theme/
@@ -121,9 +129,9 @@ retry / "Open settings" are all meant to work since the review-fix pass — plea
 
 ## Project status
 
-As of 2026-09-18 (`3b38155`): `assembleDebug` and `assembleRelease` both pass with zero compile
-warnings. Smoke-tested with no crashes on an emulator and on a **physical Pixel 10 Pro XL**
-against a real 3,132-item library.
+As of 2026-09-18: builds clean. Smoke-tested with no crashes on an emulator and on a
+**physical Pixel 10 Pro XL** against a real 3,132-item library (itemised at `3b38155`); the
+viewer-features work on top of that (PR #2) was built and tested on the emulator.
 
 Working: the grid with live MediaStore refresh; **Albums** folder browsing with the viewer
 scoped to the folder you opened from; **sorting** for both the folder list (8 orderings) and
@@ -131,6 +139,12 @@ the media inside a folder (10, including date taken vs date added); pager swipin
 1:1 sync; **grid position restored** to the photo you were viewing when you back out; back
 handling; all three permission paths including partial "Select photos" access; video playback;
 and video frame capture end to end, confirmed on real hardware.
+
+Added in PR #2: **swipe up for details** with real EXIF (camera, exposure, GPS); videos **start
+muted**; a **basic photo editor** (rotate, mirror, crop, brightness/contrast/saturation — always
+saves a copy); animated transitions; and **one-handed video controls** — shutter in the
+lower-right corner, previous/next-frame buttons and a jog strip for frame-accurate scrubbing,
+all drawn as see-through "ghost" outlines.
 
 Performance: thumbnails are served from MediaStore's cached versions rather than decoding
 full-size camera JPEGs, which took the filmstrip stutter from bad to "mostly gone" on a real
