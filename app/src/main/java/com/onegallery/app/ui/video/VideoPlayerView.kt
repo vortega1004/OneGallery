@@ -21,9 +21,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -33,8 +31,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.VolumeOff
-import androidx.compose.material.icons.rounded.VolumeUp
+import androidx.compose.material.icons.automirrored.rounded.VolumeOff
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Camera
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -66,7 +64,9 @@ import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
@@ -78,6 +78,7 @@ import androidx.media3.common.MediaItem as ExoMediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.ScrubbingModeParameters
 import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
 import com.onegallery.app.ui.common.rememberThumbnailRequest
@@ -87,6 +88,7 @@ import com.onegallery.app.ui.theme.OneUIBlue
 import com.onegallery.app.ui.theme.ShutterFlashColor
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.util.Locale
 
 /**
  * Replicates Samsung Video Viewer with 1-Tap Instant Frame Capture:
@@ -97,8 +99,10 @@ import kotlinx.coroutines.launch
  * - Shutter flash feedback + animated thumbnail fly-in
  *
  * The controls share their visibility with the host screen's overlays ([controlsVisible]) and are
- * laid out inside [controlsPadding] so the host's top/bottom bars never cover them. Playback only
- * runs while [isActivePage] is true and the app is in the foreground.
+ * laid out inside [controlsPadding], for a host that draws its own chrome *over* this page. When
+ * the host instead reserves room (insetting the page above its bottom bar, as the viewer does)
+ * that padding is zero. Playback only runs while [isActivePage] is true and the app is in the
+ * foreground.
  *
  * Sound is controlled by the host ([isMuted]) rather than per player, so the choice carries
  * from one video to the next while the user pages through the viewer. Videos autoplay, so the
@@ -118,6 +122,7 @@ fun VideoPlayerView(
     onSnapshotTaken: ((Bitmap) -> Unit)? = null
 ) {
     val context = LocalContext.current
+    val density = LocalDensity.current
     val haptic = LocalHapticFeedback.current
     val coroutineScope = rememberCoroutineScope()
     val repository = remember { MediaStoreRepository(context.applicationContext) }
@@ -140,9 +145,30 @@ fun VideoPlayerView(
 
     var textureViewRef by remember { mutableStateOf<TextureView?>(null) }
 
+    // Bumped on every seek the user drives (frame steps, jog strip, seek bar). Scrubbing mode is
+    // switched on for the burst and off again once they stop — see the effect below.
+    var scrubTick by remember { mutableIntStateOf(0) }
+
+    // Measured, not assumed: the capture badge has to clear the control cluster, and the cluster
+    // changes height with the phone's width (the step row wraps nothing, but the bars differ).
+    var controlsHeightPx by remember { mutableIntStateOf(0) }
+
+    // Where the next frame step counts from, or null to count from wherever the player is.
+    //
+    // Steps must not measure from exoPlayer.currentPosition during a burst. Held buttons and jog
+    // drags fire far faster than a seek completes, and while they do the reported position does
+    // not reliably reflect the seek already in flight — so every step in the burst measures from
+    // the same frame and ten taps move one frame. Anchoring the target here makes a burst add up
+    // exactly: ten taps are ten frames, whether or not the decoder has caught up yet.
+    var stepAnchorMs by remember(mediaItem.uri) { mutableStateOf<Long?>(null) }
+
     val exoPlayer = remember(mediaItem.uri) {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(ExoMediaItem.fromUri(mediaItem.uri))
+            // Defaults only — the point is what they leave alone. ScrubbingModeParameters.DEFAULT
+            // sets no fractional seek tolerance, so seeks stay frame-exact; what it does change is
+            // keeping the codec warm between them (see the stepping comment below).
+            setScrubbingModeParameters(ScrubbingModeParameters.DEFAULT)
             // prepare() is deferred until this page is the active one (see below). Scrubbing the
             // filmstrip composes every video page it passes; preparing each of them spun up a
             // decoder per page for nothing.
@@ -173,6 +199,10 @@ fun VideoPlayerView(
         if (isActivePage) {
             delay(ACTIVATION_DELAY_MS)
             if (exoPlayer.playbackState == Player.STATE_IDLE) exoPlayer.prepare()
+            // Scrubbing mode silences the audio track, so it must not survive into playback
+            // that the user did not start from the play button (paging back onto a video
+            // they were mid-scrub on, for instance)
+            if (exoPlayer.isScrubbingModeEnabled) exoPlayer.setScrubbingModeEnabled(false)
             exoPlayer.play()
         } else {
             exoPlayer.pause()
@@ -195,6 +225,8 @@ fun VideoPlayerView(
 
     // Ticking position updater
     LaunchedEffect(exoPlayer, isPlaying) {
+        // Playback invalidates the step anchor: the player is now the authority on position again
+        if (isPlaying) stepAnchorMs = null
         currentPositionMs = exoPlayer.currentPosition
         while (isPlaying) {
             delay(100L)
@@ -209,6 +241,14 @@ fun VideoPlayerView(
             delay(3000L)
             onControlsVisibleChange(false)
         }
+    }
+
+    // Scrubbing mode costs something to leave on (it disables the audio track and runs the video
+    // codec hot), so it is dropped once the user has stopped hunting for a frame.
+    LaunchedEffect(scrubTick) {
+        if (scrubTick == 0) return@LaunchedEffect
+        delay(SCRUBBING_IDLE_MS)
+        if (exoPlayer.isScrubbingModeEnabled) exoPlayer.setScrubbingModeEnabled(false)
     }
 
     // Each capture restarts the badge timer, so a quick second capture isn't hidden early
@@ -226,19 +266,53 @@ fun VideoPlayerView(
         }
     }
 
+    /**
+     * Puts the player in scrubbing mode for a burst of user-driven seeks.
+     *
+     * An exact seek normally restarts decoding at the keyframe before the target and replays
+     * every frame in between — on a two-second GOP a single-frame step can mean decoding sixty
+     * frames, and holding the step button queues one of those per repeat. Scrubbing mode keeps
+     * the codec primed across consecutive seeks (it may skip the MediaCodec flush entirely, marks
+     * intermediate frames decode-only and raises the operating rate) while leaving the seek
+     * itself exact.
+     */
+    val beginScrub: () -> Unit = {
+        if (!exoPlayer.isScrubbingModeEnabled) exoPlayer.setScrubbingModeEnabled(true)
+        scrubTick++
+    }
+
     // Frame-accurate stepping (buttons and jog strip). Always pauses: single frames are only
     // meaningful on a still picture. ExoPlayer's default seek mode is already exact.
     val stepFrames: (Int) -> Unit = { frames ->
         exoPlayer.pause()
+        beginScrub()
         val target = frameStepPositionMs(
-            currentMs = exoPlayer.currentPosition,
+            currentMs = stepAnchorMs ?: exoPlayer.currentPosition,
             frames = frames,
             frameRate = exoPlayer.videoFormat?.frameRate ?: -1f,
             durationMs = durationMs
         )
+        stepAnchorMs = target
         exoPlayer.seekTo(target)
         // The position ticker only runs during playback
         currentPositionMs = target
+    }
+
+    /**
+     * Leaves scrubbing mode at once, rather than waiting out [SCRUBBING_IDLE_MS].
+     *
+     * Enabling scrubbing mode suppresses playback (`PLAYBACK_SUPPRESSION_REASON_SCRUBBING`)
+     * without clearing `playWhenReady`, so a seek-bar drag taken while playing would otherwise
+     * sit silent for the whole idle window before resuming. Frame stepping keeps the timer —
+     * it is already paused, and staying warm is the point between taps.
+     */
+    val endScrub: () -> Unit = {
+        if (exoPlayer.isScrubbingModeEnabled) exoPlayer.setScrubbingModeEnabled(false)
+    }
+
+    val resumePlayback: () -> Unit = {
+        if (exoPlayer.isScrubbingModeEnabled) exoPlayer.setScrubbingModeEnabled(false)
+        exoPlayer.play()
     }
 
     val captureFrame: () -> Unit = {
@@ -324,7 +398,11 @@ fun VideoPlayerView(
             exit = scaleOut() + fadeOut(),
             modifier = Modifier
                 .align(Alignment.BottomStart)
-                .padding(start = 24.dp, bottom = controlsPadding.calculateBottomPadding() + 88.dp)
+                .padding(
+                    start = 24.dp,
+                    bottom = controlsPadding.calculateBottomPadding() +
+                        with(density) { controlsHeightPx.toDp() } + 24.dp
+                )
         ) {
             capturedThumb?.let { bmp ->
                 Box(
@@ -347,12 +425,12 @@ fun VideoPlayerView(
 
         // Ghost control cluster.
         //
-        // Laid out for one-handed, right-thumb use on a large phone: everything the thumb needs
-        // while hunting for a frame (jog strip, frame step, shutter) is stacked in the
-        // lower-right, with the shutter in the corner itself. Nothing is drawn in the centre or
-        // on the left above the seek bar, so the picture stays clear. Play/pause sits at the
-        // left end of the seek bar by request — a tap anywhere on the video is not bound to it,
-        // that toggles the controls.
+        // Two rows, not three: the jog strip shares a row with the frame-step buttons and the
+        // shutter rather than sitting above them, because every dp this cluster is tall is a dp
+        // of picture it covers. The frame-hunting controls stay bunched at the right where a
+        // right thumb reaches, with the shutter in the corner itself; the jog strip takes the
+        // leftover width. A tap anywhere on the video is not bound to play/pause — that toggles
+        // the controls.
         AnimatedVisibility(
             visible = controlsVisible,
             enter = fadeIn(),
@@ -367,26 +445,33 @@ fun VideoPlayerView(
                 )
         ) {
             Column(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .onSizeChanged { controlsHeightPx = it.height },
                 horizontalAlignment = Alignment.End,
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                // Precision scrub: distance = frames, regardless of how long the video is
-                FrameJogStrip(
-                    onScrubStart = { exoPlayer.pause() },
-                    onStepFrames = { frames ->
-                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                        stepFrames(frames)
-                    },
-                    modifier = Modifier
-                        .width(220.dp)
-                        .height(40.dp)
-                )
-
                 Row(
+                    modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
+                    // Precision scrub: distance = frames, regardless of how long the video is.
+                    // Given the leftover width, so it shrinks on a narrow phone instead of
+                    // pushing the buttons off the edge.
+                    FrameJogStrip(
+                        onScrubStart = {
+                            exoPlayer.pause()
+                            beginScrub()
+                        },
+                        onStepFrames = { frames ->
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            stepFrames(frames)
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(36.dp)
+                    )
                     GhostRepeatButton(
                         icon = Icons.Rounded.SkipPrevious,
                         contentDescription = "Previous frame",
@@ -397,55 +482,56 @@ fun VideoPlayerView(
                         contentDescription = "Next frame",
                         onStep = { stepFrames(1) }
                     )
-                    Spacer(modifier = Modifier.width(6.dp))
                     // 1-tap frame capture, in the corner the right thumb rests on
                     GhostIconButton(
                         icon = Icons.Rounded.Camera,
                         contentDescription = "Capture Frame",
                         onClick = captureFrame,
-                        size = 60.dp,
+                        size = 56.dp,
                         iconSize = 28.dp,
                         emphasized = true
                     )
                 }
 
-                // Playback bar: play/pause | time | seek | duration | mute
+                // Playback bar: time | seek | duration | play/pause | mute.
+                // Play moved off the far left to this end of the bar, inboard of mute.
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(Color(0x33000000), RoundedCornerShape(16.dp))
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
                 ) {
                     val maxPositionMs = durationMs.toFloat().coerceAtLeast(1f)
                     val shownPositionMs = seekPositionMs?.toLong() ?: currentPositionMs
 
-                    GhostIconButton(
-                        icon = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                        contentDescription = if (isPlaying) "Pause" else "Play",
-                        onClick = { if (isPlaying) exoPlayer.pause() else exoPlayer.play() },
-                        size = 40.dp
-                    )
-
+                    // One decimal, always. Switching precision between playing and paused made
+                    // the label change width and shoved the seek bar sideways on every pause.
                     Text(
-                        // Milliseconds only while paused: that is when frames are being hunted,
-                        // and a ticking ms readout during playback is just noise
-                        text = if (isPlaying) formatMs(shownPositionMs) else formatMsPrecise(shownPositionMs),
+                        text = formatTime(shownPositionMs),
                         color = GhostContent,
                         fontSize = 12.sp,
+                        maxLines = 1,
+                        softWrap = false,
                         style = GhostTextStyle,
-                        modifier = Modifier.padding(start = 8.dp)
+                        modifier = Modifier.padding(start = 6.dp)
                     )
 
                     Slider(
                         value = (seekPositionMs ?: currentPositionMs.toFloat()).coerceIn(0f, maxPositionMs),
                         onValueChange = { newPos ->
+                            // Same warm-codec path the frame steps use: a drag is dozens of
+                            // exact seeks in a row
+                            beginScrub()
                             seekPositionMs = newPos
+                            // Stepping after a drag continues from where the drag left off
+                            stepAnchorMs = newPos.toLong()
                             exoPlayer.seekTo(newPos.toLong())
                         },
                         onValueChangeFinished = {
                             seekPositionMs?.let { currentPositionMs = it.toLong() }
                             seekPositionMs = null
+                            endScrub()
                         },
                         valueRange = 0f..maxPositionMs,
                         colors = SliderDefaults.colors(
@@ -459,19 +545,28 @@ fun VideoPlayerView(
                     )
 
                     Text(
-                        text = formatMs(durationMs),
+                        text = formatTime(durationMs),
                         color = GhostContent,
                         fontSize = 12.sp,
+                        maxLines = 1,
+                        softWrap = false,
                         style = GhostTextStyle
                     )
 
                     GhostIconButton(
-                        icon = if (isMuted) Icons.Rounded.VolumeOff else Icons.Rounded.VolumeUp,
+                        icon = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                        contentDescription = if (isPlaying) "Pause" else "Play",
+                        onClick = { if (isPlaying) exoPlayer.pause() else resumePlayback() },
+                        size = 44.dp,
+                        iconSize = 24.dp
+                    )
+
+                    GhostIconButton(
+                        icon = if (isMuted) Icons.AutoMirrored.Rounded.VolumeOff else Icons.AutoMirrored.Rounded.VolumeUp,
                         contentDescription = if (isMuted) "Unmute" else "Mute",
                         onClick = { onMutedChange(!isMuted) },
                         size = 40.dp,
-                        iconSize = 20.dp,
-                        modifier = Modifier.padding(start = 8.dp)
+                        iconSize = 20.dp
                     )
                 }
             }
@@ -486,17 +581,29 @@ private val GhostTextStyle = TextStyle(
 
 private const val ACTIVATION_DELAY_MS = 150L
 
-/** m:ss.mmm — shown while paused, when the user is looking for a specific frame. */
-private fun formatMsPrecise(ms: Long): String {
-    val clamped = ms.coerceAtLeast(0)
-    return String.format("%d:%02d.%03d", clamped / 60_000, (clamped / 1000) % 60, clamped % 1000)
-}
+/** How long after the last user-driven seek the player leaves scrubbing mode. */
+private const val SCRUBBING_IDLE_MS = 900L
 
-private fun formatMs(ms: Long): String {
-    val totalSeconds = (ms / 1000).coerceAtLeast(0)
-    val minutes = totalSeconds / 60
-    val seconds = totalSeconds % 60
-    return String.format("%d:%02d", minutes, seconds)
+/**
+ * m:ss.t — the only clock format in the player.
+ *
+ * One fixed format, because swapping between seconds and milliseconds changed the label's width
+ * and dragged the seek bar sideways on every pause.
+ *
+ * Tenths are for reading, not for counting: a frame is 33.3 ms at 30 fps, so consecutive frames
+ * often share a tenth. This also renders [currentPositionMs], which a frame step sets to the
+ * position it *asked* for — it is not a report of what the decoder rendered. Neither this nor
+ * the value behind it can be used as evidence of a frame count.
+ */
+private fun formatTime(ms: Long): String {
+    val clamped = ms.coerceAtLeast(0)
+    return String.format(
+        Locale.US,
+        "%d:%02d.%d",
+        clamped / 60_000,
+        (clamped / 1000) % 60,
+        (clamped % 1000) / 100
+    )
 }
 
 private fun findTextureView(viewGroup: ViewGroup): TextureView? {

@@ -72,9 +72,9 @@ dependencies {
     implementation("io.coil-kt.coil3:coil-gif:3.0.4")
 
     // Video Playback (Media3 / ExoPlayer)
-    implementation("androidx.media3:media3-exoplayer:1.4.1")
-    implementation("androidx.media3:media3-ui:1.4.1")
-    implementation("androidx.media3:media3-common:1.4.1")
+    implementation("androidx.media3:media3-exoplayer:1.8.0")
+    implementation("androidx.media3:media3-ui:1.8.0")
+    implementation("androidx.media3:media3-common:1.8.0")
 
     // EXIF metadata support
     implementation("androidx.exifinterface:exifinterface:1.3.7")

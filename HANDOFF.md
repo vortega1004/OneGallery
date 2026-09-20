@@ -1,12 +1,56 @@
 # OneGallery — Engineering Handoff
 
-**Last verified:** 2026-09-18 — `viewer-features` (PR #2) built, tested and merged. Earlier
-rows in §1 were measured at `3b38155`; PR #2's row lists what was checked on its own head.
-**Status:** Builds clean. Smoke-tested on the emulator and on a physical Pixel 10 Pro XL
-against a real 3,132-item library. Video frame capture works on real hardware. Two
-performance problems appear only at that scale (§6.15, §6.16). See §1 for exactly what was
-and was not exercised.
+**Last verified:** 2026-09-20 — video control ergonomics and frame-step speed, built and
+exercised on the `Pixel_9_Pro_XL` AVD, and revised after one review round. **Uncommitted at
+time of writing** (see the note below). Rows in §1 predating this are from PR #2 at `1ea2d9f` and earlier from `3b38155`.
+**Status:** Builds clean (debug and release, zero warnings from this project's sources),
+17 unit tests pass. Smoke-tested on the emulator and on a physical
+Pixel 10 Pro XL against a real 3,132-item library. Video frame capture works on real
+hardware. Two performance problems appear only at that scale (§6.15, §6.16). See §1 for
+exactly what was and was not exercised.
 **Owner:** Victor Ortega
+
+---
+
+## 0. Note to the reviewer of the 2026-09-20 change
+
+**Status: reviewed once (`REVIEWER.md`, OpenCode / GPT-6-Astra) and revised.** All three
+findings were upheld and fixed — see the review-pass note at the end of §7's top entry. The
+frame-precision evidence in §1 is now frame-level rather than clock-based. The items below
+are the *original* risk list, kept because they are still the right things to look at.
+
+The full write-up is the top entry of §7 and the per-item evidence is in §1; this is what is
+worth your attention rather than a summary of the diff.
+
+**Three things carry real risk:**
+
+1. **Media3 1.4.1 → 1.8.0.** A four-minor-version jump, taken only to get
+   `ExoPlayer.setScrubbingModeEnabled`. It compiles with no source changes and runs on the
+   AVD, but nothing here exercises HDR, codec fallback or unusual containers, and the owner's
+   library is 681 real videos. If you want to reduce blast radius, 1.6.0 is the first release
+   with the API.
+2. **Scrubbing mode changes player behaviour while it is on.** It disables the audio and
+   metadata tracks, raises the codec operating rate, and suppresses playback
+   (`PLAYBACK_SUPPRESSION_REASON_SCRUBBING`). It is entered on any user-driven seek
+   and left 900 ms after the last one, immediately when play is pressed, and immediately
+   before a page auto-plays (that last one closes the obvious escape: paging away mid-scrub and
+   back again). Worth checking whether any *other* path can strand a video with no audio —
+   lifecycle stop/start, pager recycle. I did not find one; I also did not prove there isn't
+   one.
+3. **The pager is now inset by a measured height.** `bottomBarHeightPx` comes from
+   `onSizeChanged` on the bottom bar, which `AnimatedVisibility` stops composing when hidden —
+   so the last measurement is deliberately retained and the inset is gated on
+   `isOverlayVisible` instead. First composition inserts one extra layout pass at 0 dp. Check
+   this against a fresh cold start and a rotation.
+
+**What the emulator could not answer,** and what the owner should therefore judge on the
+Pixel: whether frame stepping now *feels* fast (the AVD decodes in software), and whether the
+enlarged hit areas actually stop the mis-taps. Exactness and step-count accuracy *are*
+measured — see §1.
+
+**Please don't re-derive** the frame-step arithmetic in `frameStepPositionMs`; it is unchanged
+and unit-tested. The bug was never the arithmetic, it was the position it was measuring from —
+see the new entry in §6a.
 
 This document is the single source of truth for anyone — human or AI agent — picking up this
 codebase. Everything marked **VERIFIED** was confirmed by actually running it, not inferred
@@ -30,7 +74,7 @@ crashes** on either. Anything the emulator's tiny library cannot exercise is cal
 | --- | --- |
 | `gradlew assembleDebug` | **VERIFIED PASSING** — ~21 MB `app-debug.apk` |
 | `gradlew assembleRelease` | **VERIFIED PASSING** — 4 MB minified (R8 + `proguard-rules.pro` work) |
-| Compile warnings | **Zero** |
+| Compile warnings | **Zero from this project's sources** — verified with `gradlew clean` then `assembleDebug assembleRelease testDebugUnitTest --rerun-tasks`, which is the only way to see them (see §9). Four `Icons.Rounded.*` deprecations were live and this row wrongly said zero: `VolumeOff`/`VolumeUp` (`VideoPlayerView`) and `RotateLeft`/`RotateRight` (`PhotoEditorScreen`). All four are fixed by moving to `Icons.AutoMirrored.Rounded.*`, not suppressed. The AGP-vs-`compileSdk` advisory from the toolchain is unrelated to the sources and still prints |
 | Grid + live refresh | **VERIFIED** — thumbnails render; `ContentObserver` picked up new media 7 → 8 → 9 items with no restart |
 | Pager swiping | **VERIFIED** — advances; the old gesture-starvation bug is gone |
 | Filmstrip 1:1 sync | **VERIFIED** — active thumbnail spans x582–762, centre 672 on a 1344 px screen (dead centre) |
@@ -51,7 +95,16 @@ crashes** on either. Anything the emulator's tiny library cannot exercise is cal
 | Sorting (albums + media) | **VERIFIED on emulator** — all options present, orders correct, grid/viewer indices stay aligned after a re-sort, selection survives the viewer. "Date taken" vs "Date added" divergence **NOT verifiable on the emulator**: every test file has a null EXIF capture time, so `dateTaken` falls back to `dateAdded` and the two orders coincide by definition |
 | Thumbnail decoding | **VERIFIED firing** on emulator (fetch path instrumented and counted); **speedup only measurable on real photos** — emulator test images are 480×360, so there is nothing to save. Owner reports stutter "mostly gone" on the Pixel |
 | Launcher icon | **VERIFIED** — adaptive icon renders correctly under the launcher mask |
-| Automated tests | First JVM unit tests added in PR #2 (`gradlew.bat test`): `PhotoEditStateTest`, `FrameStepTest`, `ExifDetailsTest`. Pure logic only — nothing covers the UI, MediaStore or playback |
+| Automated tests | **17 JVM unit tests pass** (`gradlew.bat test`): `PhotoEditStateTest`, `FrameStepTest`, `ExifDetailsTest`, added in PR #2. Pure logic only — nothing covers the UI, MediaStore or playback |
+| Video clock readout | **VERIFIED on emulator** — one decimal at all times (`0:11.0` / `0:20.0`), playing and paused. The old seconds-vs-milliseconds swap no longer resizes the label. Note the readout is a *display* format only: at 30 fps three consecutive frames can share a tenth, so it cannot be used to count frames (it also shows the requested seek target, not the rendered frame) |
+| Bottom bar has its own space | **VERIFIED on emulator** — the pager is inset above the filmstrip when the chrome is showing, so a full-height photo ends cleanly above it; the inset drops to zero when the chrome hides, giving true fullscreen |
+| Jog strip direction | **VERIFIED on emulator, frame-level** — read off a clip with burned-in frame numbers: a 600 px drag left went frame **406 → 421**, the same drag right went **421 → 406**. Left = forward, and the two are exactly symmetric (±15 frames for 600 px at 12 dp/frame, 480 dpi, less touch slop) |
+| Play/pause and mute placement | **VERIFIED on emulator** — both at the right-hand end of the playback bar, play inboard of mute. Pause and resume both confirmed by tap |
+| Frame stepping accuracy under burst | **VERIFIED on emulator, frame-level** — evidence is the frame number burned into the video, i.e. what the decoder actually rendered, not the requested target. From a standing pause: 10 rapid taps on next-frame went **405 → 415**; one more tap **415 → 416**; 10 rapid taps on previous-frame **416 → 406**. Exact in both directions, single and burst |
+| Frame stepping *latency* | **NOT MEASURED — anywhere.** The AVD decodes in software, so no timing taken here transfers to the Pixel. Scrubbing mode is in, and the rows above show it does not break exactness, but **no before/after latency number exists for it** and none should be quoted until one is taken on hardware (§5a) |
+| Ghost control hit areas | **NOT ASSESSED** — enlarged to ≥48 dp with a 5 dp ring beyond each painted circle, but "do I still miss it" needs a real thumb |
+| Step-anchor fix, before/after | **VERIFIED that behaviour changed**, at two different precisions. Before the fix, 10 rapid taps moved the readout by ~0.1 s; after, by ~0.33 s. Tenths cannot resolve one frame, but it comfortably separates ~3 frames from ~10, so the *contrast* holds. The exact post-fix count (10) comes from the frame-number clip, not from that readout. There is no frame-level capture of the pre-fix build |
+| Media3 1.4.1 → 1.8.0 | **VERIFIED building and running on emulator** — required for `ExoPlayer.setScrubbingModeEnabled`. No API breakage; `PlayerView` unchanged |
 | `viewer-features` (PR #2) | **VERIFIED on emulator** at `1ea2d9f`. Compiles first try (4 deprecation warnings: `RotateLeft`/`RotateRight`/`VolumeUp`/`VolumeOff`); 17 unit tests pass; release APK 4.27 MB. Re-checked the VERIFIED behaviours it touches: frame capture still 1280×720 with EXIF + `Captured from…` UserComment; overlay collision clear (capture y2128, seek y2332, filmstrip y2578); album scoping correct with no stale `viewerAlbumId`; grid restore returns to the photo last viewed. Editor rotate→save copy: 480×360 → 360×480, EXIF carried, original untouched. Zero crashes. Owner independently confirmed on the emulator. **Not exercised:** crop / brightness / contrast / saturation, frame stepping, jog strip, swipe-up tuning, rewritten pinch — all need real touch |
 
 The project previously did **not** compile. One Kotlin error and two missing build files
@@ -229,6 +282,18 @@ viewer stays composed while animating out and would swap its list mid-fade. Insi
 second `AnimatedContent` is keyed by `GridDestination.key`; album items are built from the
 *destination's* album for the same reason. Grid cells use `animateItem()`.
 
+**Video seeking:** exact seeks are the default and frame stepping needs them, but each one
+restarts decoding at the previous keyframe. Two things make that usable. The player is put in
+`setScrubbingModeEnabled(true)` for a burst of user-driven seeks — frame steps, jog strip and
+seek-bar drags all route through `beginScrub()` — and dropped 900 ms after the last one. It is
+not free to leave on: it disables the audio and metadata tracks, runs the codec hot, and
+**suppresses playback** via `PLAYBACK_SUPPRESSION_REASON_SCRUBBING` without clearing
+`playWhenReady`. That last part is why a finished seek-bar drag calls `endScrub()` immediately
+instead of waiting out the timer, and why `resumePlayback()` and the page-activation effect
+both clear it before calling `play()`. And the step target is anchored in `stepAnchorMs` rather than
+re-read from the player, because during a burst the reported position lags the seek in flight
+(§6a). The viewer inset (`reservedBottom`) means the player's own `controlsPadding` is zero.
+
 ### Intentional design notes
 
 - **`res/` holds only the launcher icon.** The manifest still uses a framework *theme*
@@ -336,17 +401,27 @@ Added by PR #2 (`viewer-features`):
 22. `gradlew.bat test` → `PhotoEditStateTest`, `ExifDetailsTest` and `FrameStepTest` pass.
 23. **One-handed video controls (right thumb, Pixel 10 Pro XL).** Holding the phone in the
     right hand only: the shutter is in the lower-right corner and reachable without shifting
-    grip; previous/next-frame sit just left of it; the jog strip is above them. There is **no**
-    play button in the middle of the video — play/pause is at the left end of the seek bar. The
-    controls are outlines with almost no fill; the picture is clearly visible through them.
+    grip; previous/next-frame sit just left of it; the jog strip is on the **same row**, to
+    their left. There is **no** play button in the middle of the video — play/pause is at the
+    **right-hand end** of the seek bar, inboard of mute. The controls are outlines with almost
+    no fill; the picture is clearly visible through them.
     *Supersedes step 6's "Capture sits below the top bar" and the §1 collision row's Capture
-    coordinates* — re-measure with `uiautomator dump`: jog strip, frame buttons + shutter and
-    the seek bar must all sit above the filmstrip and not overlap each other.
-24. **Frame precision.** Pause, tap next-frame: the picture advances by exactly one frame and
-    the time readout (now `m:ss.mmm` while paused) moves by one frame interval (33 ms at 30 fps).
-    Hold the button → it walks frames. Drag the jog strip slowly → one haptic tick and one frame
-    per ~12 dp, right = forward; the pager must not swipe while dragging it. Capture while
-    stepped → the saved still is the frame on screen. Try a 60 fps and a slow-motion clip.
+    coordinates* — re-measure with `uiautomator dump`: the jog/step/shutter row and the seek
+    bar must sit above the filmstrip and not overlap each other. Note the viewer now
+    **reserves** the bottom bar's height rather than drawing under it, so "overlap" means
+    overlap within the inset page, not with the bar.
+    *Superseded by the 2026-09-20 change: play/pause was on the left and the jog strip was on
+    its own row above the buttons.*
+24. **Frame precision.** Pause, tap next-frame: the picture advances by exactly one frame.
+    **Judge this from the picture, not the clock** — the readout is `m:ss.t`, and at 30 fps
+    three consecutive frames can share a tenth, so it cannot resolve a single step. It also
+    shows the *requested* seek target, not what was rendered. Use a clip with burned-in frame
+    numbers (see §5) if you need to prove a count.
+    Hold the button → it walks frames. Drag the jog strip slowly → one haptic tick and one
+    frame per ~12 dp, **left = forward**; the pager must not swipe while dragging it. Capture
+    while stepped → the saved still is the frame on screen. Try a 60 fps and a slow-motion clip
+    (the frame rate comes from `videoFormat`, and variable-rate phone footage is approximated).
+    *Superseded by the 2026-09-20 change: the paused readout was `m:ss.mmm` and right = forward.*
 
 ---
 
@@ -396,7 +471,8 @@ references still resolve; issues fixed in the 2026-09-18 review-fix pass are lis
 
 `VideoPlayerView.kt` (`PlayerView(ctx)` factory and `findTextureView`)
 
-**VERIFIED by decompiling `media3-ui-1.4.1`:** `PlayerView` reads `surface_type` from XML
+**VERIFIED by decompiling `media3-ui-1.4.1`:** (still true in 1.8.0, which the app now uses)
+`PlayerView` reads `surface_type` from XML
 attributes and defaults to `SURFACE_TYPE_SURFACE_VIEW`. Constructed programmatically as
 `PlayerView(ctx)` with no attrs it creates a **SurfaceView**, so `findTextureView()` always
 returns `null`. (A SurfaceView's contents can't be read via `getBitmap()` anyway.)
@@ -528,6 +604,14 @@ Changing either of these back will break things silently, with no error:
   clear `viewerAlbumId`, and the album grid must build its items from the `GridDestination`'s
   album rather than `openedAlbumId` — both are already reset by the time the exit animation
   draws. (§4)
+- **A burst of seeks must not measure from `exoPlayer.currentPosition`.** Held step buttons
+  and jog drags fire far faster than an exact seek completes, and the position reported while
+  one is in flight does not reliably reflect it — so every step in the burst measures from the
+  same frame. The step target is now anchored in `stepAnchorMs` and only falls back to the
+  player when there is no burst in progress. Verified on the emulator against a clip with
+  burned-in frame numbers — 10 rapid taps move exactly 10 rendered frames, in both directions.
+  Do **not** try to confirm this from the on-screen clock: it is tenths, and it displays the
+  requested target rather than the rendered frame. (§4, §1)
 - **Grid state must stay hoisted in `GalleryApp`.** The viewer replaces the grid in the
   composition rather than stacking on it, so anything remembered inside `GalleryGridScreen` is
   destroyed when a photo opens. (§4)
@@ -535,6 +619,80 @@ Changing either of these back will break things silently, with no error:
 ---
 
 ## 7. Changelog
+
+### 2026-09-20 — video control ergonomics and frame-step speed (uncommitted at time of writing)
+
+Six items of owner feedback from testing the merged build on the Pixel, plus one follow-up
+asked for mid-change. Built, unit-tested (17 pass) and exercised on the `Pixel_9_Pro_XL` AVD
+against a purpose-made 20 s / 30 fps / 2 s-GOP clip — a long GOP so exact seeks really do cost
+a re-decode. Per-item results are in §1.
+
+1. **Clock resized itself on pause.** It swapped between `m:ss` while playing and `m:ss.mmm`
+   while paused, so the label changed width and shoved the seek bar sideways. Now one format,
+   `m:ss.t`, everywhere — position and duration. Tenths are a *legibility* choice, not a
+   measurement tool: at 30 fps a frame is 33.3 ms, so three consecutive frames can share a
+   tenth. Do not count frames with it.
+2. **Chrome ate the picture, and the picture ran under the chrome.** Two changes. The viewer
+   now *reserves* the bottom bar's height: `HorizontalPager` is inset by the measured bar while
+   the chrome is visible and by nothing when it is hidden, so a photo matching the screen's
+   aspect ratio is no longer partly behind the filmstrip. And the chrome itself shrank — the
+   filmstrip from 84 dp to 70 dp (thumbnails 44×60 → 38×48, height now derived from the
+   thumbnail rather than hardcoded), the action row's vertical padding from 12 dp to 2 dp, and
+   the ghost cluster from three rows to two by putting the jog strip, both frame-step buttons
+   and the shutter on one row. The jog strip takes the leftover width via `weight(1f)` instead
+   of a fixed 220 dp, so it cannot push the buttons off a narrow screen.
+3. **Jog direction flipped.** Drag left is now forward. The ticks still travel with the thumb,
+   which is the point: the strip reads as film moving under a fixed needle.
+4. **Play/pause moved** from the far left of the playback bar to the right-hand end.
+5. **Hit areas enlarged.** `GhostIconButton` and `GhostRepeatButton` now paint the circle at
+   the requested size but take touches over `max(size + 10 dp, 48 dp)`, so a near miss still
+   lands. Row spacing dropped to 4 dp to pay for the extra width, which leaves a *larger*
+   visible gap between circles than before.
+6. **"Frame stepping is very slow" turned out to be two problems, only one of which was
+   speed.** They have very different evidence behind them; keep them apart.
+   - *It barely moved — **fixed and measured**.* Each step recomputed its target from
+     `exoPlayer.currentPosition`, and during a burst that does not reflect the seek already in
+     flight, so every step measured from the same frame. The target is now anchored in
+     `stepAnchorMs`. Verified against a clip with burned-in frame numbers, so the evidence is
+     the rendered frame rather than the requested one: 10 rapid taps went 405 → 415, one more
+     416, 10 back 406. See §1.
+   - *Each step costs a re-decode — **addressed, not measured**.* An exact seek restarts at
+     the previous keyframe and replays every frame to the target. Media3 was bumped
+     1.4.1 → 1.8.0 for `ExoPlayer.setScrubbingModeEnabled`, which keeps the codec primed
+     across consecutive seeks. **No latency number exists for this**, here or on hardware —
+     the AVD decodes in software, so nothing measured here would transfer (§5a). What *is*
+     established: it does not break exactness. `ScrubbingModeParameters.DEFAULT` leaves
+     `fractionalSeekToleranceBefore/After` null (read from the 1.8.0 bytecode), and the
+     frame-level results above were taken with scrubbing mode active.
+
+   Scrubbing mode is entered on any user-driven seek (frame steps, jog strip, seek-bar drags)
+   and left 900 ms after the last one, immediately when play is pressed, immediately before a
+   page auto-plays, and immediately when a seek-bar drag finishes. That last one matters
+   because enabling scrubbing mode **suppresses playback**
+   (`PLAYBACK_SUPPRESSION_REASON_SCRUBBING`) without clearing `playWhenReady` — caught in
+   review; a drag taken while playing would otherwise have sat silent for the idle window
+   before resuming.
+
+Follow-up during the same pass: play/pause and mute were swapped, so the bar ends
+`… | duration | play/pause | mute`.
+
+Also: the capture badge's clearance above the control cluster is now measured
+(`onSizeChanged`) rather than a hardcoded 88 dp, which the taller cluster would have collided
+with.
+
+**Review pass (OpenCode / GPT-6-Astra, `REVIEWER.md`).** Three findings, all upheld, all
+fixed rather than argued down:
+- The original frame-accuracy claim rested on a tenths-resolution clock that cannot resolve a
+  single frame, and which displays the requested target rather than the rendered frame. Re-run
+  against a purpose-built clip with burned-in frame numbers; §1 now cites those, and the
+  latency claim is marked unmeasured.
+- "Zero compile warnings" was stale — two volume-icon deprecations. Fixed at source with
+  `Icons.AutoMirrored.Rounded.*`; the row now says what was re-checked and how.
+- Checklist steps 23–24 still described the old control placement, jog direction and paused
+  clock format. Updated, with the superseded expectations called out rather than deleted.
+- The reviewer also noted that scrubbing mode suppresses playback, which the handoff had not
+  said. Confirmed in `media3-common` 1.8.0 and, more usefully, it exposed a real defect in the
+  seek-bar path — see item 6.
 
 ### 2026-09-18 — `viewer-features` branch, PR #2 (written blind, since built and tested)
 
@@ -748,8 +906,10 @@ Still unexercised on-device: the viewer, filmstrip sync, and video frame capture
 
 Roughly dependency-ordered. Good first tasks are marked ★.
 
-0. ★ **Itemise PR #2's test results in §1** (device, warnings, which of §5 steps 13–24 were
-   walked), and **measure the scrub change on the Pixel** (§5a, §6.15) — keep it or revert it
+0. ★ **Measure frame-step latency on the Pixel.** The 2026-09-20 change added scrubbing mode
+   for exactly this and **no latency number exists for it anywhere** — the AVD decodes in
+   software (§5a). Until someone times it on hardware, the speed half of that fix is
+   unsubstantiated. Same run should cover the scrub change from PR #2 (§6.15) — keep or revert
    on numbers. Tune the one-handed control constants (`GhostVideoControls.kt`,
    `SwipeUpGesture.kt`) if reach or sensitivity is off.
 1. ★ **Paginate the library load** (§6.16). `queryMediaItems` pulls all 3,132 rows into memory
@@ -809,6 +969,19 @@ Roughly dependency-ordered. Good first tasks are marked ★.
   when it was fine, and once the reverse.
 
 ### Useful techniques found the hard way
+
+- **Warning counts are only true after `gradlew clean`.** Kotlin's incremental compiler does
+  not recompile untouched files, so their warnings never print again. Two deprecations sat
+  unnoticed through several builds on 2026-09-20 and two more only appeared on the clean run
+  after that. Before claiming anything about warnings, run
+  `gradlew clean` then `assembleDebug assembleRelease testDebugUnitTest --rerun-tasks`.
+- **To prove a frame count, burn frame numbers into the test clip.** The on-screen clock
+  cannot do it: it is tenths (three frames can share one at 30 fps) and it renders the
+  *requested* seek target, not what the decoder produced. Generate one with
+  `ffmpeg -f lavfi -i color=c=black:s=1280x720:r=30:d=20 -vf "drawtext=fontfile='C\:/Windows/Fonts/arialbd.ttf':text='%{frame_num}':start_number=0:fontsize=260:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2" -c:v libx264 -pix_fmt yuv420p -g 60 -keyint_min 60 -sc_threshold 0 framenum.mp4`,
+  then read the number off a screenshot. `-g 60` gives a two-second GOP so exact seeks really
+  do cost a re-decode. `drawtext` needs an explicit `fontfile=` on Windows or ffmpeg segfaults
+  looking for a fontconfig default.
 
 - `uiautomator dump` beats screenshots for verifying layout and state: it gives exact pixel
   bounds and every `content-desc`, so "do these overlap?" and "which photo is showing?"

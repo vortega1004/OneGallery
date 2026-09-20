@@ -76,8 +76,10 @@ fun FilmStripInfinityViewer(
     val coroutineScope = rememberCoroutineScope()
     val density = LocalDensity.current
 
-    val itemWidth = 44.dp
-    val itemHeight = 60.dp
+    // Kept deliberately small: the strip is now given its own space at the bottom of the
+    // viewer instead of floating over the picture, so every dp here is a dp the photo loses.
+    val itemWidth = 38.dp
+    val itemHeight = 48.dp
     val itemSpacing = 4.dp
     val expandedScale = 1.25f
     val itemStridePx = with(density) { (itemWidth + itemSpacing).toPx() }
@@ -140,7 +142,7 @@ fun FilmStripInfinityViewer(
     BoxWithConstraints(
         modifier = modifier
             .fillMaxWidth()
-            .height(84.dp)
+            .height(itemHeight * expandedScale + 10.dp)
             .background(Color(0xCC000000)),
         contentAlignment = Alignment.Center
     ) {

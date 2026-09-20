@@ -26,8 +26,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Flip
-import androidx.compose.material.icons.rounded.RotateLeft
-import androidx.compose.material.icons.rounded.RotateRight
+import androidx.compose.material.icons.automirrored.rounded.RotateLeft
+import androidx.compose.material.icons.automirrored.rounded.RotateRight
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -364,8 +364,8 @@ private fun CropPanel(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceEvenly
         ) {
-            EditorAction(icon = Icons.Rounded.RotateLeft, label = "Rotate left", onClick = onRotateLeft)
-            EditorAction(icon = Icons.Rounded.RotateRight, label = "Rotate right", onClick = onRotateRight)
+            EditorAction(icon = Icons.AutoMirrored.Rounded.RotateLeft, label = "Rotate left", onClick = onRotateLeft)
+            EditorAction(icon = Icons.AutoMirrored.Rounded.RotateRight, label = "Rotate right", onClick = onRotateRight)
             EditorAction(icon = Icons.Rounded.Flip, label = "Mirror", onClick = onFlip)
         }
         Row(

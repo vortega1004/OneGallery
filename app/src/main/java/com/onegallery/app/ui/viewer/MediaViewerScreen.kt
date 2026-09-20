@@ -129,12 +129,15 @@ fun MediaViewerScreen(
     // if the user paged or scrubbed far from where they entered.
     LaunchedEffect(currentItem.id) { onVisibleItemChange(currentItem.id) }
 
-    // Measured overlay heights, handed to the video page so its controls sit clear of the bars
+    // The bottom bar gets its own space rather than covering the picture: the page is inset by
+    // however tall the bar measured, so a photo whose aspect ratio matches the screen is no
+    // longer hidden behind the filmstrip. The last measurement is kept while the bar is hidden
+    // (AnimatedVisibility stops composing it, so onSizeChanged never reports zero), and the inset
+    // is simply dropped to zero then, giving a real fullscreen view on tap.
     val density = LocalDensity.current
-    var topBarHeightPx by remember { mutableIntStateOf(0) }
     var bottomBarHeightPx by remember { mutableIntStateOf(0) }
-    val videoControlsPadding = with(density) {
-        PaddingValues(top = topBarHeightPx.toDp(), bottom = bottomBarHeightPx.toDp())
+    val reservedBottom = with(density) {
+        if (isOverlayVisible) bottomBarHeightPx.toDp() else 0.dp
     }
 
     val dateFormat = remember { SimpleDateFormat("MMM d, yyyy", Locale.getDefault()) }
@@ -145,10 +148,11 @@ fun MediaViewerScreen(
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        // Fullscreen Pager
         HorizontalPager(
             state = pagerState,
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(bottom = reservedBottom),
             key = { index -> mediaItems[index].id }
         ) { pageIndex ->
             val item = mediaItems[pageIndex]
@@ -164,7 +168,9 @@ fun MediaViewerScreen(
                     isActivePage = isActivePage,
                     controlsVisible = isOverlayVisible,
                     onControlsVisibleChange = { isOverlayVisible = it },
-                    controlsPadding = videoControlsPadding,
+                    // Zero: the page already ends above the bottom bar, so the player's controls
+                    // only need their own margin from the edge of the page
+                    controlsPadding = PaddingValues(0.dp),
                     isMuted = isVideoMuted,
                     onMutedChange = { isVideoMuted = it }
                 )
@@ -189,7 +195,6 @@ fun MediaViewerScreen(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .onSizeChanged { topBarHeightPx = it.height }
                     .background(Color(0x99000000))
                     .statusBarsPadding()
                     .padding(top = 4.dp, bottom = 12.dp, start = 8.dp, end = 8.dp)
@@ -278,7 +283,7 @@ fun MediaViewerScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 24.dp, vertical = 12.dp),
+                        .padding(horizontal = 24.dp, vertical = 2.dp),
                     horizontalArrangement = Arrangement.SpaceAround,
                     verticalAlignment = Alignment.CenterVertically
                 ) {

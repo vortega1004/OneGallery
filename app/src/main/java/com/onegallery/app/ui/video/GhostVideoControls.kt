@@ -53,27 +53,43 @@ internal fun GhostIconButton(
     iconSize: Dp = 22.dp,
     emphasized: Boolean = false
 ) {
+    // The tappable box is deliberately larger than the painted circle: these sit over video with
+    // no chrome to aim at, and a thumb reaching across the phone lands short of centre.
     Box(
         modifier = modifier
-            .size(size)
+            .size(touchTargetFor(size))
             .clip(CircleShape)
-            .background(GhostFill)
-            .border(
-                width = if (emphasized) 2.dp else 1.dp,
-                color = if (emphasized) GhostOutlineStrong else GhostOutline,
-                shape = CircleShape
-            )
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = contentDescription,
-            tint = GhostContent,
-            modifier = Modifier.size(iconSize)
-        )
+        Box(
+            modifier = Modifier
+                .size(size)
+                .clip(CircleShape)
+                .background(GhostFill)
+                .border(
+                    width = if (emphasized) 2.dp else 1.dp,
+                    color = if (emphasized) GhostOutlineStrong else GhostOutline,
+                    shape = CircleShape
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = contentDescription,
+                tint = GhostContent,
+                modifier = Modifier.size(iconSize)
+            )
+        }
     }
 }
+
+/**
+ * Hit area for a ghost control of a given painted [size]: at least [MIN_TOUCH_TARGET], and always
+ * a little wider than the circle itself so neighbouring controls stay separated by real gaps
+ * rather than by touching hit boxes.
+ */
+private fun touchTargetFor(size: Dp): Dp = maxOf(size + TOUCH_SLOP_RING * 2, MIN_TOUCH_TARGET)
 
 /**
  * Fires [onStep] once on press, then keeps firing while held — tap for a single frame, hold to
@@ -92,10 +108,8 @@ internal fun GhostRepeatButton(
 
     Box(
         modifier = modifier
-            .size(size)
+            .size(touchTargetFor(size))
             .clip(CircleShape)
-            .background(GhostFill)
-            .border(1.dp, GhostOutline, CircleShape)
             .pointerInput(Unit) {
                 detectTapGestures(
                     onPress = {
@@ -114,12 +128,21 @@ internal fun GhostRepeatButton(
             },
         contentAlignment = Alignment.Center
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = contentDescription,
-            tint = GhostContent,
-            modifier = Modifier.size(24.dp)
-        )
+        Box(
+            modifier = Modifier
+                .size(size)
+                .clip(CircleShape)
+                .background(GhostFill)
+                .border(1.dp, GhostOutline, CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = contentDescription,
+                tint = GhostContent,
+                modifier = Modifier.size(24.dp)
+            )
+        }
     }
 }
 
@@ -127,7 +150,10 @@ internal fun GhostRepeatButton(
  * A jog strip for frame-accurate scrubbing. The seek bar maps the whole video onto one screen
  * width — on a 5-minute clip that is ~200 ms per pixel, so single frames are unreachable. Here
  * distance maps to *frames* instead: every [JOG_DP_PER_FRAME] dp dragged is exactly one frame,
- * whatever the video's length. Drag right to go forward, left to go back.
+ * whatever the video's length.
+ *
+ * Direction follows the film, not the playhead: dragging left pulls later frames towards the
+ * needle, so left = forward and right = back, the way a reel behaves under a fixed head.
  *
  * [onStepFrames] receives whole frames only (positive = forward); the remainder carries over to
  * the next drag event so slow drags still add up.
@@ -162,10 +188,12 @@ internal fun FrameJogStrip(
                         carriedPx += dragAmount
                         tickOffsetPx += dragAmount
 
-                        val frames = (carriedPx / pxPerFrame).toInt()
-                        if (frames != 0) {
-                            carriedPx -= frames * pxPerFrame
-                            latestOnStepFrames(frames)
+                        val dragged = (carriedPx / pxPerFrame).toInt()
+                        if (dragged != 0) {
+                            carriedPx -= dragged * pxPerFrame
+                            // Negated: the ticks travel with the thumb, so the frame under the
+                            // fixed needle moves the opposite way
+                            latestOnStepFrames(-dragged)
                         }
                     }
                 )
@@ -229,4 +257,10 @@ internal const val DEFAULT_FRAME_RATE = 30.0
 
 private const val JOG_DP_PER_FRAME = 12
 private const val HOLD_BEFORE_REPEAT_MS = 350L
-private const val REPEAT_INTERVAL_MS = 90L
+private const val REPEAT_INTERVAL_MS = 70L
+
+/** Android's recommended minimum, applied to controls that have no chrome to aim at. */
+private val MIN_TOUCH_TARGET = 48.dp
+
+/** Extra tappable ring around every ghost control, beyond the circle that is actually painted. */
+private val TOUCH_SLOP_RING = 5.dp
