@@ -493,7 +493,7 @@ private fun AdjustSlider(
  * over the image.
  */
 @Composable
-private fun CropOverlay(
+internal fun CropOverlay(
     crop: NormalizedRect,
     interactive: Boolean,
     onCropChange: (NormalizedRect) -> Unit,

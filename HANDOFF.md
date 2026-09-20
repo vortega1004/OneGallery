@@ -1,19 +1,28 @@
 # OneGallery — Engineering Handoff
 
-**Last verified:** 2026-09-20 — video control ergonomics + frame-step speed, and persisted
-per-album sort orders. Both built and exercised on the `Pixel_9_Pro_XL` AVD; the video change
-has been through one review round, the sort change has not. **Both uncommitted at time of
-writing** (see the note below). Rows in §1 predating this are from PR #2 at `1ea2d9f` and earlier from `3b38155`.
-**Status:** Builds clean (debug and release, zero warnings from this project's sources),
-22 unit tests pass. Smoke-tested on the emulator and on a physical
+**Last verified:** 2026-09-20 — GIF creator on `feature/gif-creator`, **uncommitted** at
+the owner's request. Debug/release builds and 29 unit tests pass; GIF creation was exercised
+on the `Pixel_9_Pro_XL` AVD. The preceding video and sort work is committed; the review
+notes below are historical and were not re-reviewed for this feature.
+**Status:** Debug and release builds pass, 29 unit tests pass per variant. Earlier work
+was smoke-tested on the emulator and on a physical
 Pixel 10 Pro XL against a real 3,132-item library. Video frame capture works on real
 hardware. Two performance problems appear only at that scale (§6.15, §6.16). See §1 for
 exactly what was and was not exercised.
 **Owner:** Victor Ortega
 
+**Current stopping point (owner request):** Implementation is complete on
+`feature/gif-creator`; all feature changes and this handoff are **uncommitted**. Stopped
+testing to conserve usage. The current debug APK is installed on the emulator. Completed
+checks and remaining limitations are recorded below; do not automatically repeat the test
+passes. Next step is the owner's hands-on feedback or explicit instruction to commit.
+
 ---
 
 ## 0. Note to the reviewer of the 2026-09-20 change
+
+**Historical note:** this section describes the previous video/sort change, now committed.
+The current uncommitted GIF feature is documented in §1, §4, §6.17 and the top of §7.
 
 **Scope note:** the uncommitted tree now also contains the sort-persistence change, which is
 *newer than `REVIEWER.md`* and has not been reviewed by anyone. It is a separate top entry in
@@ -102,7 +111,10 @@ crashes** on either. Anything the emulator's tiny library cannot exercise is cal
 | Sorting (albums + media) | **VERIFIED on emulator** — all options present, orders correct, grid/viewer indices stay aligned after a re-sort, selection survives the viewer. "Date taken" vs "Date added" divergence **NOT verifiable on the emulator**: every test file has a null EXIF capture time, so `dateTaken` falls back to `dateAdded` and the two orders coincide by definition |
 | Thumbnail decoding | **VERIFIED firing** on emulator (fetch path instrumented and counted); **speedup only measurable on real photos** — emulator test images are 480×360, so there is nothing to save. Owner reports stutter "mostly gone" on the Pixel |
 | Launcher icon | **VERIFIED** — adaptive icon renders correctly under the launcher mask |
-| Automated tests | **22 JVM unit tests pass** (`gradlew.bat test`): `PhotoEditStateTest`, `FrameStepTest`, `ExifDetailsTest` (17, from PR #2) and `SortPreferencesTest` (5, new). Pure logic only — nothing covers the UI, MediaStore, playback, or DataStore's storage layer |
+| Automated tests | **29 JVM unit tests pass per variant** (`gradlew.bat test`): the previous 22 plus `GifDraftTest` (4) and `GifEncoderTest` (3). GIF tests cover ordered selection, loop sequences, frame editing, dimensions/timing, and independent ImageIO decoding including LZW dictionary resets and colour quantization. UI and MediaStore coverage remains manual |
+| GIF image selection | **VERIFIED on emulator** — two endpoints + Select between selected four images in displayed order; long-press drag selected nine consecutive images; dragging toward the bottom edge scrolled and extended the selection to 18. Selection works in Pictures and is wired identically inside albums; the album-specific flow still needs a manual pass |
+| GIF editor and export | **VERIFIED on emulator** — duplicate inserted immediately after the active frame, removal restored the four-frame sequence; speed, rotation, square crop and boomerang saved successfully to `Pictures/OneGallery Gifs/`. Independent Pillow decoding: 405×405, six frames, 110 ms each, infinite loop, hashes in A B C D C B order. A nine-image 1080px-canvas export also completed. Reverse preview and pause exercised |
+| GIF rotation and cancellation | **VERIFIED on emulator** — nine-frame draft survived portrait→landscape→portrait; tools scroll beside the preview in landscape. Cancelling an 18-image export with Back returned to the draft; MediaStore and the output directory contained only the two earlier completed GIFs, with no partial file. Large-library / physical-Pixel performance **not measured** |
 | Video clock readout | **VERIFIED on emulator** — one decimal at all times (`0:11.0` / `0:20.0`), playing and paused. The old seconds-vs-milliseconds swap no longer resizes the label. Note the readout is a *display* format only: at 30 fps three consecutive frames can share a tenth, so it cannot be used to count frames (it also shows the requested seek target, not the rendered frame) |
 | Bottom bar has its own space | **VERIFIED on emulator** — the pager is inset above the filmstrip when the chrome is showing, so a full-height photo ends cleanly above it; the inset drops to zero when the chrome hides, giving true fullscreen |
 | Jog strip direction | **VERIFIED on emulator, frame-level** — read off a clip with burned-in frame numbers: a 600 px drag left went frame **406 → 421**, the same drag right went **421 → 406**. Left = forward, and the two are exactly symmetric (±15 frames for 600 px at 12 dp/frame, 480 dpi, less touch slop) |
@@ -322,6 +334,33 @@ re-read from the player, because during a burst the reported position lags the s
 
 ### Intentional design notes
 
+**GIF creation:** selection IDs and selection mode are hoisted in `GalleryApp`, so closing
+the creator restores the selection and grid position. `GalleryGridScreen` supplies stills
+in the current displayed sort order, scoped to the current album. Videos and existing GIFs
+are excluded. Long-press range selection consumes movement in the **Initial** pointer pass;
+a Main-pass drag detector lost the gesture to LazyGrid scrolling during the first selection
+recomposition. A separate edge-scroll loop extends the range while the finger dwells near an
+edge. The explicit Select between action is enabled for exactly two selected stills.
+
+`ui/gif/GifCreatorViewModel` owns the draft and export job across Activity recreation. Each
+frame instance has a unique key, so duplicates of one source URI remain independently
+selectable/removable. The first image's decoded, EXIF-oriented aspect ratio defines the
+common canvas. Other images fit inside it on black; rotation and normalized crop apply to
+the entire canvas. Preview and export share `GifRenderer` and the existing photo crop/rotate
+math. The shared `CropOverlay` is now internal rather than private.
+
+The creator has icon-only forward/reverse/boomerang controls (with accessibility descriptions),
+a 1–25 fps speed control quantized to GIF centiseconds, frame copy/remove/reorder, and
+480/720/1080px **canvas** choices. Cropping can reduce the final dimensions; the editor shows
+the actual output dimensions. Boomerang does not repeat endpoints: A B C B | A B C B.
+Exports always loop indefinitely.
+
+`GifEncoder` is a dependency-free streaming GIF89a encoder with per-frame weighted median-cut
+palettes and LZW. Frames are decoded/rendered/encoded one at a time; the preview uses a bounded
+24 MiB LRU, rather than holding all original photos. `GifRenderer.save` inserts an IS_PENDING
+MediaStore row and publishes it only after the stream is complete. Cancellation and ordinary
+failures delete the unfinished row/file. Output folder: **Pictures/OneGallery Gifs**.
+
 - **`res/` holds only the launcher icon.** The manifest still uses a framework *theme*
   (`@android:style/Theme.Material.NoActionBar`), so there is no `res/values/themes.xml` and no
   strings file — UI text is inline in the composables. That is deliberate, not an oversight.
@@ -490,6 +529,21 @@ and after tells you whether a change is trading CPU for heap.
 Ranked by how much they will affect a first test run. Section numbers are kept stable so old
 references still resolve; issues fixed in the 2026-09-18 review-fix pass are listed at the end.
 
+### 6.17 GIF creator limitations / remaining device coverage
+
+- Drafts and active saves survive rotation, but are not persisted across process death. Export
+  is a ViewModel coroutine, not a durable background job.
+- GIF timing in the file is exact in 10 ms units. Preview waits for uncached images to decode,
+  so its first cycle (or a very large selection exceeding the cache) may run slower than the
+  selected speed. Physical-Pixel latency and large-selection memory behaviour are unmeasured.
+- Canvas uses the first image's aspect ratio and fits other images on black. No fill/cover
+  mode, background picker, transparency, per-frame durations, or dithering control yet.
+- Selection accepts still images (including a motion photo's still component), not video or
+  animated-GIF expansion. At least two frame instances are retained in the creator.
+- Crop presets place a rectangle; free corner dragging is not aspect-locked, matching the
+  existing photo editor. Physical-thumb crop/drag ergonomics, album selection, sharing to an
+  external app, and storage/access-failure recovery still need manual coverage.
+
 > The fixes from the 2026-09-18 pass have since been **built and smoke-tested** on the AVD —
 > §1 records exactly which were confirmed and which were not reachable by automated testing.
 
@@ -645,6 +699,27 @@ Changing either of these back will break things silently, with no error:
 ---
 
 ## 7. Changelog
+
+### 2026-09-20 — GIF creator (`feature/gif-creator`, uncommitted)
+
+Owner requested image-to-GIF creation, bulk image selection, icon-only loop direction,
+speed, whole-GIF rotation/crop, a full filmstrip, in-place frame copy/removal, and saving to
+`OneGallery Gifs`. Implemented those plus edge auto-scroll, the two-endpoint range fallback,
+frame reordering, output-size choices, export progress/cancellation, and Share after saving.
+Original source images are never edited or deleted by frame operations.
+
+Added `ui/gif/{GifDraft,GifCreatorViewModel,GifCreatorScreen,GifRenderer,GifEncoder}.kt`,
+`ui/grid/ImageDragSelection.kt`, and seven meaningful unit tests. Integrated through
+`GalleryApp` and the Pictures/album media grids; reused the photo editor's normalized crop
+overlay and renderer. No additional runtime dependency.
+
+Verification: `gradlew.bat assembleDebug assembleRelease test` passed, 29 tests per variant.
+Manual emulator evidence is itemized in §1. The saved four-image boomerang was read back via
+its MediaStore URI and decoded with Pillow: six distinct frame positions, four unique
+images with the two reverse interior repeats, 110 ms dwell, 405×405 after rotate+square crop,
+NETSCAPE loop count 0 (forever). JVM tests also decode independently with JDK ImageIO;
+random indexed pixels round-trip across all LZW code widths and dictionary resets.
+No claims of physical-device performance. Work is intentionally left uncommitted for the owner.
 
 ### 2026-09-20 — sort orders are saved, and saved per album (uncommitted at time of writing)
 

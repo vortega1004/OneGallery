@@ -50,6 +50,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel as composeViewModel
+import com.onegallery.app.ui.gif.GifCreatorScreen
+import com.onegallery.app.ui.gif.GifCreatorViewModel
 import kotlinx.coroutines.launch
 import com.onegallery.app.domain.forAlbum
 import com.onegallery.app.domain.sortedBy
@@ -178,6 +181,9 @@ class MainActivity : ComponentActivity() {
 fun GalleryApp(viewModel: GalleryViewModel) {
     val mediaItems by viewModel.mediaItems.collectAsStateWithLifecycle()
     var selectedItemIndex by rememberSaveable { mutableIntStateOf(-1) }
+    var selectionMode by rememberSaveable { mutableStateOf(false) }
+    var selectedImageIds by rememberSaveable { mutableStateOf(longArrayOf()) }
+    val gifCreator: GifCreatorViewModel = composeViewModel()
 
     // Grid browsing state lives here, not in GalleryGridScreen: the viewer *replaces* the grid
     // in the composition, so state owned by the grid would be discarded every time a photo is
@@ -235,6 +241,18 @@ fun GalleryApp(viewModel: GalleryViewModel) {
 
     // System back / back gesture returns to the grid instead of leaving the app
     BackHandler(enabled = selectedItemIndex >= 0) { closeViewer() }
+
+    if (gifCreator.draft != null) {
+        GifCreatorScreen(gifCreator, onClose = {
+            val saved = gifCreator.savedUri != null
+            gifCreator.close()
+            if (saved) {
+                selectionMode = false
+                selectedImageIds = longArrayOf()
+            }
+        })
+        return
+    }
 
     // The viewer still *replaces* the grid (grid state stays hoisted above, see the notes at
     // the top of this function); AnimatedContent only overlaps the two for the ~200 ms of the
@@ -296,6 +314,11 @@ fun GalleryApp(viewModel: GalleryViewModel) {
                     scope.launch { albumListGridState.scrollToTopAfterReorder() }
                 },
                 mediaSort = mediaSort,
+                selectionMode = selectionMode,
+                selectedImageIds = selectedImageIds.toSet(),
+                onSelectionModeChange = { selectionMode = it },
+                onSelectionChange = { selectedImageIds = it.toLongArray() },
+                onCreateGif = gifCreator::open,
                 onMediaSortChange = {
                     // Recorded against the album on screen, so each folder keeps its own order
                     viewModel.setMediaSort(openedAlbumId, it)

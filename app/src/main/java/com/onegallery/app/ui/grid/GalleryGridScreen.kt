@@ -9,6 +9,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -35,6 +36,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Sort
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Checklist
+import androidx.compose.material.icons.rounded.RadioButtonUnchecked
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -48,6 +53,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -80,6 +86,7 @@ import com.onegallery.app.ui.theme.DarkSurface
 import com.onegallery.app.ui.theme.DarkTextPrimary
 import com.onegallery.app.ui.theme.DarkTextSecondary
 import com.onegallery.app.ui.theme.OneUIBlue
+import com.onegallery.app.ui.gif.selectionBetween
 
 const val TAB_PICTURES = 0
 const val TAB_ALBUMS = 1
@@ -115,6 +122,11 @@ fun GalleryGridScreen(
     mediaSort: MediaSort,
     onMediaSortChange: (MediaSort) -> Unit,
     onItemClick: (albumId: String?, index: Int) -> Unit,
+    selectionMode: Boolean,
+    selectedImageIds: Set<Long>,
+    onSelectionModeChange: (Boolean) -> Unit,
+    onSelectionChange: (Set<Long>) -> Unit,
+    onCreateGif: (List<MediaItem>) -> Unit,
     modifier: Modifier = Modifier
 ) {
     // Derived from the list already in memory — no second MediaStore query.
@@ -125,15 +137,36 @@ fun GalleryGridScreen(
     val sortedAllItems = remember(mediaItems, mediaSort) {
         mediaItems.forAlbum(null).sortedBy(mediaSort)
     }
+    val selectableItems = remember(mediaItems, openedAlbumId, mediaSort) {
+        mediaItems.forAlbum(openedAlbumId).sortedBy(mediaSort).filter { it.canBeGifFrame }
+    }
+    val selectedImages = selectableItems.filter { it.id in selectedImageIds }
+    val clearSelection = { onSelectionChange(emptySet()); onSelectionModeChange(false) }
+    LaunchedEffect(selectableItems) {
+        val available = selectableItems.mapTo(hashSetOf()) { it.id }
+        if (selectedImageIds.any { it !in available }) onSelectionChange(selectedImageIds.intersect(available))
+    }
 
     // Inside an album, back returns to the folder list rather than leaving the screen.
     BackHandler(enabled = openedAlbum != null) { onOpenAlbum(null) }
+    BackHandler(enabled = selectionMode) { clearSelection() }
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
         containerColor = DarkBackground,
         bottomBar = {
-            NavigationBar(
+            if (selectionMode) {
+                NavigationBar(containerColor = DarkSurface) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                        TextButton(enabled = selectedImages.size == 2, onClick = {
+                            onSelectionChange(selectionBetween(selectableItems.map { it.id }, selectedImageIds))
+                        }) { Text("Select between") }
+                        TextButton(enabled = selectedImages.size >= 2, onClick = { onCreateGif(selectedImages) }) {
+                            Text("Create GIF (${selectedImages.size})")
+                        }
+                    }
+                }
+            } else NavigationBar(
                 containerColor = DarkSurface,
                 tonalElevation = 8.dp
             ) {
@@ -205,11 +238,14 @@ fun GalleryGridScreen(
                         val albumItems = remember(mediaItems, album.id, mediaSort) {
                             mediaItems.forAlbum(album.id).sortedBy(mediaSort)
                         }
-                        OneUIHeader(
+                        if (selectionMode) SelectionHeader(selectedImages.size, clearSelection) else OneUIHeader(
                             title = album.name,
                             subtitle = itemCountLabel(albumItems.size),
                             onBack = { onOpenAlbum(null) },
                             trailing = {
+                                IconButton(onClick = { onSelectionModeChange(true) }) {
+                                    Icon(Icons.Rounded.Checklist, "Select images", tint = DarkTextPrimary)
+                                }
                                 SortMenu(
                                     current = mediaSort,
                                     options = MediaSort.entries,
@@ -226,6 +262,10 @@ fun GalleryGridScreen(
                             gridState = albumGridState,
                             restoreToItemId = restoreToItemId,
                             onRestoreHandled = onRestoreHandled,
+                            selectionMode = selectionMode,
+                            selectedIds = selectedImageIds,
+                            onSelectionChange = onSelectionChange,
+                            onSelectionStart = { onSelectionModeChange(true) },
                             onItemClick = { index -> onItemClick(album.id, index) }
                         )
                     }
@@ -257,10 +297,13 @@ fun GalleryGridScreen(
                     }
 
                     else -> {
-                        OneUIHeader(
+                        if (selectionMode) SelectionHeader(selectedImages.size, clearSelection) else OneUIHeader(
                             title = "Pictures",
                             subtitle = itemCountLabel(sortedAllItems.size),
                             trailing = {
+                                IconButton(onClick = { onSelectionModeChange(true) }) {
+                                    Icon(Icons.Rounded.Checklist, "Select images", tint = DarkTextPrimary)
+                                }
                                 SortMenu(
                                     current = mediaSort,
                                     options = MediaSort.entries,
@@ -277,6 +320,10 @@ fun GalleryGridScreen(
                             gridState = picturesGridState,
                             restoreToItemId = restoreToItemId,
                             onRestoreHandled = onRestoreHandled,
+                            selectionMode = selectionMode,
+                            selectedIds = selectedImageIds,
+                            onSelectionChange = onSelectionChange,
+                            onSelectionStart = { onSelectionModeChange(true) },
                             onItemClick = { index -> onItemClick(null, index) }
                         )
                     }
@@ -402,6 +449,10 @@ private fun MediaGrid(
     gridState: LazyGridState,
     restoreToItemId: Long?,
     onRestoreHandled: () -> Unit,
+    selectionMode: Boolean,
+    selectedIds: Set<Long>,
+    onSelectionChange: (Set<Long>) -> Unit,
+    onSelectionStart: () -> Unit,
     onItemClick: (Int) -> Unit
 ) {
     if (mediaItems.isEmpty()) {
@@ -425,6 +476,8 @@ private fun MediaGrid(
 
     val latestColumnCount by rememberUpdatedState(columnCount)
     val latestOnColumnCountChange by rememberUpdatedState(onColumnCountChange)
+    val dragSelection = imageDragSelection(gridState, mediaItems, selectedIds, onSelectionChange,
+        onSelectionStart)
 
     LazyVerticalGrid(
         state = gridState,
@@ -434,6 +487,7 @@ private fun MediaGrid(
         verticalArrangement = Arrangement.spacedBy(2.dp),
         modifier = Modifier
             .fillMaxSize()
+            .then(dragSelection)
             .pointerInput(Unit) {
                 // Runs in the Initial pass so a two-finger pinch is claimed before the grid's
                 // own scrolling sees (and consumes) it. Zoom deltas arrive per event (each
@@ -471,13 +525,28 @@ private fun MediaGrid(
         ) { index, item ->
             MediaGridCell(
                 mediaItem = item,
-                onClick = { onItemClick(index) },
+                onClick = {
+                    if (selectionMode) {
+                        if (item.canBeGifFrame) onSelectionChange(
+                            if (item.id in selectedIds) selectedIds - item.id else selectedIds + item.id
+                        )
+                    } else onItemClick(index)
+                },
+                selectionMode = selectionMode,
+                selected = item.id in selectedIds,
                 // Cells glide to their new slot when the column count or sort changes, and
                 // fade when MediaStore adds/removes an item, instead of the grid snapping.
                 modifier = Modifier.animateItem()
             )
         }
     }
+}
+
+@Composable
+private fun SelectionHeader(count: Int, onClose: () -> Unit) {
+    OneUIHeader("$count selected", "Hold & drag, or select two endpoints and tap Select between", trailing = {
+        IconButton(onClick = onClose) { Icon(Icons.Rounded.Close, "Cancel selection", tint = Color.White) }
+    })
 }
 
 @Composable
@@ -588,6 +657,8 @@ private fun <T> SortMenu(
 private fun MediaGridCell(
     mediaItem: MediaItem,
     onClick: () -> Unit,
+    selectionMode: Boolean = false,
+    selected: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     Box(
@@ -603,6 +674,19 @@ private fun MediaGridCell(
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize()
         )
+        if (selectionMode) {
+            if (!mediaItem.canBeGifFrame) {
+                Box(Modifier.fillMaxSize().background(Color(0xAA000000)))
+            } else {
+                Box(Modifier.fillMaxSize().border(if (selected) 3.dp else 1.dp,
+                    if (selected) OneUIBlue else Color(0x55FFFFFF)))
+                Icon(if (selected) Icons.Rounded.CheckCircle else Icons.Rounded.RadioButtonUnchecked,
+                    if (selected) "Selected image" else "Unselected image",
+                    tint = if (selected) OneUIBlue else Color.White,
+                    modifier = Modifier.align(Alignment.TopEnd).padding(6.dp)
+                        .background(Color(0x99000000), RoundedCornerShape(12.dp)).size(24.dp))
+            }
+        }
 
         // Video Badge & Duration
         if (mediaItem.isVideo) {
