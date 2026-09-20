@@ -51,8 +51,6 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
-import com.onegallery.app.domain.AlbumSort
-import com.onegallery.app.domain.MediaSort
 import com.onegallery.app.domain.forAlbum
 import com.onegallery.app.domain.sortedBy
 import com.onegallery.app.domain.MediaItem
@@ -205,17 +203,23 @@ fun GalleryApp(viewModel: GalleryViewModel) {
     var viewerVisibleItemId by rememberSaveable { mutableStateOf<Long?>(null) }
     var restoreToItemId by rememberSaveable { mutableStateOf<Long?>(null) }
 
-    // Hoisted with the rest of the browsing state so the chosen order survives opening a photo.
-    var albumSort by rememberSaveable { mutableStateOf(AlbumSort.DEFAULT) }
-    var mediaSort by rememberSaveable { mutableStateOf(MediaSort.DEFAULT) }
+    // Sort orders are persisted (DataStore) rather than hoisted state, so they survive a cold
+    // start and not just the viewer. Media sort is per album — `mediaSortFor` falls back to the
+    // last order chosen anywhere for folders the user has never sorted. See `SortPreferences`.
+    val sortPreferences by viewModel.sortPreferences.collectAsStateWithLifecycle()
+    val albumSort = sortPreferences.albumSort
+    val mediaSort = sortPreferences.mediaSortFor(openedAlbumId)
 
     // Scope the pager to the set the user was actually looking at, so swiping inside an album
     // stays inside that album. Kept as a bucket id rather than a list so it survives process
     // death and still tracks live MediaStore updates.
     // Must match GalleryGridScreen's list exactly — same filter, same sort. The viewer opens
     // by index, so any disagreement would open a different photo than the one tapped.
-    val viewerItems = remember(mediaItems, viewerAlbumId, mediaSort) {
-        mediaItems.forAlbum(viewerAlbumId).sortedBy(mediaSort)
+    // Sorted by the *viewer's* album, which is the album the grid was showing when the photo
+    // was tapped. Reading `mediaSort` here would be wrong the moment the two differ.
+    val viewerMediaSort = sortPreferences.mediaSortFor(viewerAlbumId)
+    val viewerItems = remember(mediaItems, viewerAlbumId, viewerMediaSort) {
+        mediaItems.forAlbum(viewerAlbumId).sortedBy(viewerMediaSort)
     }
 
     val closeViewer = {
@@ -288,12 +292,13 @@ fun GalleryApp(viewModel: GalleryViewModel) {
                 // which would also fire when returning from the viewer and fight the
                 // restore-to-item scroll.
                 onAlbumSortChange = {
-                    albumSort = it
+                    viewModel.setAlbumSort(it)
                     scope.launch { albumListGridState.scrollToTopAfterReorder() }
                 },
                 mediaSort = mediaSort,
                 onMediaSortChange = {
-                    mediaSort = it
+                    // Recorded against the album on screen, so each folder keeps its own order
+                    viewModel.setMediaSort(openedAlbumId, it)
                     scope.launch {
                         picturesGridState.scrollToTopAfterReorder()
                         albumGridState.scrollToTopAfterReorder()

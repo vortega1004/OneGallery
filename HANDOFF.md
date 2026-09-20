@@ -1,10 +1,11 @@
 # OneGallery — Engineering Handoff
 
-**Last verified:** 2026-09-20 — video control ergonomics and frame-step speed, built and
-exercised on the `Pixel_9_Pro_XL` AVD, and revised after one review round. **Uncommitted at
-time of writing** (see the note below). Rows in §1 predating this are from PR #2 at `1ea2d9f` and earlier from `3b38155`.
+**Last verified:** 2026-09-20 — video control ergonomics + frame-step speed, and persisted
+per-album sort orders. Both built and exercised on the `Pixel_9_Pro_XL` AVD; the video change
+has been through one review round, the sort change has not. **Both uncommitted at time of
+writing** (see the note below). Rows in §1 predating this are from PR #2 at `1ea2d9f` and earlier from `3b38155`.
 **Status:** Builds clean (debug and release, zero warnings from this project's sources),
-17 unit tests pass. Smoke-tested on the emulator and on a physical
+22 unit tests pass. Smoke-tested on the emulator and on a physical
 Pixel 10 Pro XL against a real 3,132-item library. Video frame capture works on real
 hardware. Two performance problems appear only at that scale (§6.15, §6.16). See §1 for
 exactly what was and was not exercised.
@@ -14,7 +15,13 @@ exactly what was and was not exercised.
 
 ## 0. Note to the reviewer of the 2026-09-20 change
 
-**Status: reviewed once (`REVIEWER.md`, OpenCode / GPT-6-Astra) and revised.** All three
+**Scope note:** the uncommitted tree now also contains the sort-persistence change, which is
+*newer than `REVIEWER.md`* and has not been reviewed by anyone. It is a separate top entry in
+§7. The risk list below covers the video change only; for the sort change the thing to look at
+is the resolution rule and its two traps in §4.
+
+**Status: the video change was reviewed once (`REVIEWER.md`, OpenCode / GPT-6-Astra) and
+revised.** All three
 findings were upheld and fixed — see the review-pass note at the end of §7's top entry. The
 frame-precision evidence in §1 is now frame-level rather than clock-based. The items below
 are the *original* risk list, kept because they are still the right things to look at.
@@ -95,7 +102,7 @@ crashes** on either. Anything the emulator's tiny library cannot exercise is cal
 | Sorting (albums + media) | **VERIFIED on emulator** — all options present, orders correct, grid/viewer indices stay aligned after a re-sort, selection survives the viewer. "Date taken" vs "Date added" divergence **NOT verifiable on the emulator**: every test file has a null EXIF capture time, so `dateTaken` falls back to `dateAdded` and the two orders coincide by definition |
 | Thumbnail decoding | **VERIFIED firing** on emulator (fetch path instrumented and counted); **speedup only measurable on real photos** — emulator test images are 480×360, so there is nothing to save. Owner reports stutter "mostly gone" on the Pixel |
 | Launcher icon | **VERIFIED** — adaptive icon renders correctly under the launcher mask |
-| Automated tests | **17 JVM unit tests pass** (`gradlew.bat test`): `PhotoEditStateTest`, `FrameStepTest`, `ExifDetailsTest`, added in PR #2. Pure logic only — nothing covers the UI, MediaStore or playback |
+| Automated tests | **22 JVM unit tests pass** (`gradlew.bat test`): `PhotoEditStateTest`, `FrameStepTest`, `ExifDetailsTest` (17, from PR #2) and `SortPreferencesTest` (5, new). Pure logic only — nothing covers the UI, MediaStore, playback, or DataStore's storage layer |
 | Video clock readout | **VERIFIED on emulator** — one decimal at all times (`0:11.0` / `0:20.0`), playing and paused. The old seconds-vs-milliseconds swap no longer resizes the label. Note the readout is a *display* format only: at 30 fps three consecutive frames can share a tenth, so it cannot be used to count frames (it also shows the requested seek target, not the rendered frame) |
 | Bottom bar has its own space | **VERIFIED on emulator** — the pager is inset above the filmstrip when the chrome is showing, so a full-height photo ends cleanly above it; the inset drops to zero when the chrome hides, giving true fullscreen |
 | Jog strip direction | **VERIFIED on emulator, frame-level** — read off a clip with burned-in frame numbers: a 600 px drag left went frame **406 → 421**, the same drag right went **421 → 406**. Left = forward, and the two are exactly symmetric (±15 frames for 600 px at 12 dp/frame, 480 dpi, less touch slop) |
@@ -104,6 +111,8 @@ crashes** on either. Anything the emulator's tiny library cannot exercise is cal
 | Frame stepping *latency* | **NOT MEASURED — anywhere.** The AVD decodes in software, so no timing taken here transfers to the Pixel. Scrubbing mode is in, and the rows above show it does not break exactness, but **no before/after latency number exists for it** and none should be quoted until one is taken on hardware (§5a) |
 | Ghost control hit areas | **NOT ASSESSED** — enlarged to ≥48 dp with a 5 dp ring beyond each painted circle, but "do I still miss it" needs a real thumb |
 | Step-anchor fix, before/after | **VERIFIED that behaviour changed**, at two different precisions. Before the fix, 10 rapid taps moved the readout by ~0.1 s; after, by ~0.33 s. Tenths cannot resolve one frame, but it comfortably separates ~3 frames from ~10, so the *contrast* holds. The exact post-fix count (10) comes from the frame-number clip, not from that readout. There is no frame-level capture of the pre-fix build |
+| Sort order survives a cold start | **VERIFIED on emulator** — set Pictures to Name (Z–A), `am force-stop`, relaunch: still Name (Z–A). Same for the album list (Largest on disk) and for an individual album (Date added (oldest)). Kill was a full process stop, not a back-out |
+| Sort order is per album | **VERIFIED on emulator** — Pictures on Name (Z–A) while one album is on Date added (oldest); neither disturbs the other, and both survive the cold start above. A folder never sorted by hand follows the last order chosen anywhere (checked: a fresh album opened showing Name (Z–A) inherited from Pictures) |
 | Media3 1.4.1 → 1.8.0 | **VERIFIED building and running on emulator** — required for `ExoPlayer.setScrubbingModeEnabled`. No API breakage; `PlayerView` unchanged |
 | `viewer-features` (PR #2) | **VERIFIED on emulator** at `1ea2d9f`. Compiles first try (4 deprecation warnings: `RotateLeft`/`RotateRight`/`VolumeUp`/`VolumeOff`); 17 unit tests pass; release APK 4.27 MB. Re-checked the VERIFIED behaviours it touches: frame capture still 1280×720 with EXIF + `Captured from…` UserComment; overlay collision clear (capture y2128, seek y2332, filmstrip y2578); album scoping correct with no stale `viewerAlbumId`; grid restore returns to the photo last viewed. Editor rotate→save copy: 480×360 → 360×480, EXIF carried, original untouched. Zero crashes. Owner independently confirmed on the emulator. **Not exercised:** crop / brightness / contrast / saturation, frame stepping, jog strip, swipe-up tuning, rewritten pinch — all need real touch |
 
@@ -200,7 +209,8 @@ app/src/main/
     ├── GalleryViewModel.kt       # StateFlow of the media list (single MediaStore subscription)
     ├── data/
     │   ├── MediaStoreRepository.kt   # ContentResolver queries, ContentObserver, snapshot saver
-    │   └── MediaThumbnailFetcher.kt  # Coil fetcher: MediaStore thumbnails for small requests
+    │   ├── MediaThumbnailFetcher.kt  # Coil fetcher: MediaStore thumbnails for small requests
+    │   └── SortPreferences.kt        # Per-album sort orders, persisted with DataStore
     ├── domain/MediaItem.kt       # Models, toAlbums(), AlbumSort/MediaSort + their sorts
     └── ui/
         ├── common/MediaImageRequests.kt          # Coil requests: thumbnail stand-in, full-size + placeholder
@@ -281,6 +291,22 @@ rect is normalized and lives in post-transform space, so preview and save share 
 viewer stays composed while animating out and would swap its list mid-fade. Inside the grid, a
 second `AnimatedContent` is keyed by `GridDestination.key`; album items are built from the
 *destination's* album for the same reason. Grid cells use `animateItem()`.
+
+**Sort preferences** are persisted, not hoisted: `SortPreferencesRepository` (DataStore
+Preferences) is owned by `GalleryViewModel` and exposed as one `StateFlow<SortPreferences>`.
+Media sort is stored **per album**, keyed by bucket id, with the flat Pictures tab occupying a
+reserved key that no real bucket id can collide with. `SortPreferences.mediaSortFor(albumId)`
+resolves a screen's order, falling back to `defaultMediaSort` — which tracks the last choice
+made anywhere, so a preference expressed once carries to folders the user has not visited
+without overriding folders they deliberately set. Enum constants are stored by name and parsed
+defensively; renaming a sort option degrades to the default rather than crashing on launch.
+
+Two things follow from this that are easy to get wrong. The viewer must sort by
+`mediaSortFor(viewerAlbumId)`, not by whatever the grid is currently showing — its list has to
+match the grid that was on screen when the photo was tapped, and the two diverge as soon as the
+user backs out into a differently-sorted folder. And the first composition sees the defaults
+before DataStore's first emission arrives, which is exactly why the grid's scroll-to-top is
+wired to sort *events* rather than to a `LaunchedEffect` on the sort value.
 
 **Video seeking:** exact seeks are the default and frame stepping needs them, but each one
 restarts decoding at the previous keyframe. Two things make that usable. The player is put in
@@ -619,6 +645,30 @@ Changing either of these back will break things silently, with no error:
 ---
 
 ## 7. Changelog
+
+### 2026-09-20 — sort orders are saved, and saved per album (uncommitted at time of writing)
+
+Answers "is the sorting preference saved per album?" — it was not. There was one `mediaSort`
+for the whole app, `rememberSaveable`, so choosing an order inside one folder changed it
+everywhere and a cold start reset it. There was no persistence layer in the app at all.
+
+Now: `androidx.datastore:datastore-preferences:1.1.1`, a `SortPreferencesRepository` in
+`data/`, and one `StateFlow<SortPreferences>` owned by `GalleryViewModel`. Media sort is stored
+per bucket id; the album-list sort is a single value. See §4 for the resolution rule and the
+two traps it creates.
+
+The design decision worth flagging, since it is a judgement call and not the only reasonable
+one: an album with no explicit choice follows **the last order picked anywhere**, rather than a
+fixed factory default. Picking "Name (A–Z)" once therefore applies to every folder you have
+not deliberately sorted, while folders you *have* sorted keep theirs. The alternative — every
+new folder starts at "Date taken (newest)" until set — means setting the same preference over
+and over.
+
+Verified on the emulator across full `am force-stop` cold starts, for the Pictures tab, the
+album list, and an individual album, including that the three do not disturb each other
+(§1). Five new unit tests cover the resolution rule (22 total). **Not covered:** DataStore's
+own storage layer, which would need an instrumented test; and nothing here was run against a
+library with thousands of albums.
 
 ### 2026-09-20 — video control ergonomics and frame-step speed (uncommitted at time of writing)
 

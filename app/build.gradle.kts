@@ -76,6 +76,9 @@ dependencies {
     implementation("androidx.media3:media3-ui:1.8.0")
     implementation("androidx.media3:media3-common:1.8.0")
 
+    // Persisted user preferences (sort orders)
+    implementation("androidx.datastore:datastore-preferences:1.1.1")
+
     // EXIF metadata support
     implementation("androidx.exifinterface:exifinterface:1.3.7")
 
