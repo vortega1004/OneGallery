@@ -1,9 +1,10 @@
 # OneGallery — Engineering Handoff
 
-**Last verified:** 2026-09-20 — GIF creator on `feature/gif-creator`, **uncommitted** at
-the owner's request. Debug/release builds and 29 unit tests pass; GIF creation was exercised
-on the `Pixel_9_Pro_XL` AVD. The preceding video and sort work is committed; the review
-notes below are historical and were not re-reviewed for this feature.
+**Last verified:** 2026-09-21 — GIF creator **merged into `main`** (`7d1b787`,
+fast-forward) after the owner used it on their Pixel and reported it working. Debug/release
+builds and 29 unit tests pass; GIF creation was exercised on the `Pixel_9_Pro_XL` AVD and
+then by hand on the device. The feature has had **no external review** — the `REVIEWER.md`
+round covered the video change only.
 **Status:** Debug and release builds pass, 29 unit tests pass per variant. Earlier work
 was smoke-tested on the emulator and on a physical
 Pixel 10 Pro XL against a real 3,132-item library. Video frame capture works on real
@@ -11,20 +12,22 @@ hardware. Two performance problems appear only at that scale (§6.15, §6.16). S
 exactly what was and was not exercised.
 **Owner:** Victor Ortega
 
-**Current stopping point (owner request):** Implementation is complete on
-`feature/gif-creator`; all feature changes and this handoff are **uncommitted**. Stopped
-testing to conserve usage. The current debug APK is installed on the emulator. Completed
-checks and remaining limitations are recorded below; do not automatically repeat the test
-passes. Next step is the owner's hands-on feedback or explicit instruction to commit.
+**Current stopping point:** the GIF creator is merged. `main` is **3 commits ahead of
+`origin/main`** and nothing has been pushed. The owner's verdict after using it on the Pixel:
+*"working well for the most part but needs some cleanup"* — the specifics are not captured
+yet, so §6.17 stands as the known list until they are. The owner merged it deliberately
+without that cleanup, because **the main-code items in §8 are the priority, not GIF polish**.
+Do not repeat the test passes already recorded below.
 
 ---
 
 ## 0. Note to the reviewer of the 2026-09-20 change
 
-**Historical note:** this section describes the previous video/sort change, now committed.
-The current uncommitted GIF feature is documented in §1, §4, §6.17 and the top of §7.
+**Historical note:** this section describes the video/sort change, now committed and
+merged. It is kept as it was written for that one review round. The GIF creator — merged
+afterwards, and reviewed by nobody — is documented in §1, §4, §6.17 and the top of §7.
 
-**Scope note:** the uncommitted tree now also contains the sort-persistence change, which is
+**Scope note:** the tree under review also contained the sort-persistence change, which was
 *newer than `REVIEWER.md`* and has not been reviewed by anyone. It is a separate top entry in
 §7. The risk list below covers the video change only; for the sort change the thing to look at
 is the resolution rule and its two traps in §4.
@@ -114,6 +117,7 @@ crashes** on either. Anything the emulator's tiny library cannot exercise is cal
 | Automated tests | **29 JVM unit tests pass per variant** (`gradlew.bat test`): the previous 22 plus `GifDraftTest` (4) and `GifEncoderTest` (3). GIF tests cover ordered selection, loop sequences, frame editing, dimensions/timing, and independent ImageIO decoding including LZW dictionary resets and colour quantization. UI and MediaStore coverage remains manual |
 | GIF image selection | **VERIFIED on emulator** — two endpoints + Select between selected four images in displayed order; long-press drag selected nine consecutive images; dragging toward the bottom edge scrolled and extended the selection to 18. Selection works in Pictures and is wired identically inside albums; the album-specific flow still needs a manual pass |
 | GIF editor and export | **VERIFIED on emulator** — duplicate inserted immediately after the active frame, removal restored the four-frame sequence; speed, rotation, square crop and boomerang saved successfully to `Pictures/OneGallery Gifs/`. Independent Pillow decoding: 405×405, six frames, 110 ms each, infinite loop, hashes in A B C D C B order. A nine-image 1080px-canvas export also completed. Reverse preview and pause exercised |
+| GIF creator on the owner's Pixel | **USED BY THE OWNER**, 2026-09-21, on the physical Pixel 10 Pro XL against the real 3,132-item library: it works, and he wants unspecified cleanup. This row records that the feature ran on real hardware, nothing more — no timings, and no named defect list yet |
 | GIF rotation and cancellation | **VERIFIED on emulator** — nine-frame draft survived portrait→landscape→portrait; tools scroll beside the preview in landscape. Cancelling an 18-image export with Back returned to the draft; MediaStore and the output directory contained only the two earlier completed GIFs, with no partial file. Large-library / physical-Pixel performance **not measured** |
 | Video clock readout | **VERIFIED on emulator** — one decimal at all times (`0:11.0` / `0:20.0`), playing and paused. The old seconds-vs-milliseconds swap no longer resizes the label. Note the readout is a *display* format only: at 30 fps three consecutive frames can share a tenth, so it cannot be used to count frames (it also shows the requested seek target, not the rendered frame) |
 | Bottom bar has its own space | **VERIFIED on emulator** — the pager is inset above the filmstrip when the chrome is showing, so a full-height photo ends cleanly above it; the inset drops to zero when the chrome hides, giving true fullscreen |
@@ -531,6 +535,10 @@ references still resolve; issues fixed in the 2026-09-18 review-fix pass are lis
 
 ### 6.17 GIF creator limitations / remaining device coverage
 
+Merged into `main` on 2026-09-21 with these open. The owner has used it on the Pixel and
+asked for cleanup without naming it, so **this list is a starting point, not his list** —
+whatever he actually noticed is not written down anywhere yet.
+
 - Drafts and active saves survive rotation, but are not persisted across process death. Export
   is a ViewModel coroutine, not a durable background job.
 - GIF timing in the file is exact in 10 ms units. Preview waits for uncached images to decode,
@@ -700,7 +708,7 @@ Changing either of these back will break things silently, with no error:
 
 ## 7. Changelog
 
-### 2026-09-20 — GIF creator (`feature/gif-creator`, uncommitted)
+### 2026-09-20 — GIF creator (merged into `main` 2026-09-21 as `7d1b787`)
 
 Owner requested image-to-GIF creation, bulk image selection, icon-only loop direction,
 speed, whole-GIF rotation/crop, a full filmstrip, in-place frame copy/removal, and saving to
@@ -719,9 +727,13 @@ its MediaStore URI and decoded with Pillow: six distinct frame positions, four u
 images with the two reverse interior repeats, 110 ms dwell, 405×405 after rotate+square crop,
 NETSCAPE loop count 0 (forever). JVM tests also decode independently with JDK ImageIO;
 random indexed pixels round-trip across all LZW code widths and dictionary resets.
-No claims of physical-device performance. Work is intentionally left uncommitted for the owner.
+No claims of physical-device performance.
 
-### 2026-09-20 — sort orders are saved, and saved per album (uncommitted at time of writing)
+Merged 2026-09-21 as a fast-forward — the branch was one commit sitting directly on `main`,
+so there is no merge commit and `feature/gif-creator` was deleted. The owner used it on the
+Pixel first and merged on that basis; it never went through an external reviewer.
+
+### 2026-09-20 — sort orders are saved, and saved per album
 
 Answers "is the sorting preference saved per album?" — it was not. There was one `mediaSort`
 for the whole app, `rememberSaveable`, so choosing an order inside one folder changed it
@@ -1039,6 +1051,12 @@ Roughly dependency-ordered. Good first tasks are marked ★.
    `SwipeUpGesture.kt`) if reach or sensitivity is off.
 1. ★ **Paginate the library load** (§6.16). `queryMediaItems` pulls all 3,132 rows into memory
    on every change. Now the largest remaining structural problem — thumbnail decoding is done.
+1a. **GIF creator cleanup** — deliberately *below* the two items above, which is where the
+   owner put it. He has used the feature and wants polish, but has not said what; the first
+   move is to get that list from him rather than to guess from §6.17. The one thing worth
+   fixing unprompted is the missing upper bound on frame count — the lower bound is 2 and
+   there is no upper, while "Select between" over a 3,132-item library can select thousands,
+   at roughly 200 KB and one decode+encode each.
 2. **Chase the residual filmstrip stutter** (§6.15) *only if it still bothers you*. Decoding is
    no longer the bottleneck; the next suspect is per-frame recomposition of visible thumbnails
    during a pager drag. Measure on a real library before changing anything.
