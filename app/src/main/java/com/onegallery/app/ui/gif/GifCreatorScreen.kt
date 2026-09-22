@@ -189,7 +189,8 @@ fun GifCreatorScreen(model: GifCreatorViewModel, onClose: () -> Unit) {
                 GifButton(Icons.AutoMirrored.Rounded.ArrowBack, "Move frame earlier", !busy && displayedIndex > 0) {
                     stop(); model.update { it.moveActive(-1) }
                 }
-                GifButton(Icons.Rounded.ContentCopy, "Duplicate frame in place", !busy) { stop(); model.duplicate() }
+                GifButton(Icons.Rounded.ContentCopy, "Duplicate frame in place",
+                    !busy && draft.frames.size < MAX_GIF_FRAMES) { stop(); model.duplicate() }
                 GifButton(Icons.Rounded.DeleteOutline, "Remove frame from GIF", !busy && draft.frames.size > 2) { stop(); model.remove() }
                 GifButton(Icons.AutoMirrored.Rounded.ArrowForward, "Move frame later", !busy && displayedIndex < draft.frames.lastIndex) {
                     stop(); model.update { it.moveActive(1) }

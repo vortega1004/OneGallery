@@ -48,7 +48,7 @@ internal object GifRenderer {
     /** Publish only a complete file. Cancellation/error removes the pending MediaStore row. */
     suspend fun save(context: Context, draft: GifDraft, onProgress: (Int, Int) -> Unit): Uri =
         withContext(Dispatchers.IO) {
-            require(draft.frames.size >= 2)
+            require(draft.frames.size in 2..MAX_GIF_FRAMES)
             val resolver = context.contentResolver
             val now = System.currentTimeMillis()
             val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, ContentValues().apply {

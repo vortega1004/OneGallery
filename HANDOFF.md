@@ -1,7 +1,8 @@
 # OneGallery — Engineering Handoff
 
-**Last verified:** 2026-09-21 — GIF creator **merged into `main`** (`7d1b787`,
-fast-forward) after the owner used it on their Pixel and reported it working. Debug/release
+**Last verified:** 2026-09-21 — GIF frame count capped at 250 (builds clean, 31 unit
+tests pass, **not exercised on a device**). Before that, GIF creator **merged into `main`**
+(`7d1b787`, fast-forward) after the owner used it on their Pixel and reported it working. Debug/release
 builds and 29 unit tests pass; GIF creation was exercised on the `Pixel_9_Pro_XL` AVD and
 then by hand on the device. The feature has had **no external review** — the `REVIEWER.md`
 round covered the video change only.
@@ -114,9 +115,10 @@ crashes** on either. Anything the emulator's tiny library cannot exercise is cal
 | Sorting (albums + media) | **VERIFIED on emulator** — all options present, orders correct, grid/viewer indices stay aligned after a re-sort, selection survives the viewer. "Date taken" vs "Date added" divergence **NOT verifiable on the emulator**: every test file has a null EXIF capture time, so `dateTaken` falls back to `dateAdded` and the two orders coincide by definition |
 | Thumbnail decoding | **VERIFIED firing** on emulator (fetch path instrumented and counted); **speedup only measurable on real photos** — emulator test images are 480×360, so there is nothing to save. Owner reports stutter "mostly gone" on the Pixel |
 | Launcher icon | **VERIFIED** — adaptive icon renders correctly under the launcher mask |
-| Automated tests | **29 JVM unit tests pass per variant** (`gradlew.bat test`): the previous 22 plus `GifDraftTest` (4) and `GifEncoderTest` (3). GIF tests cover ordered selection, loop sequences, frame editing, dimensions/timing, and independent ImageIO decoding including LZW dictionary resets and colour quantization. UI and MediaStore coverage remains manual |
+| Automated tests | **31 JVM unit tests pass per variant** (`gradlew.bat test`): the previous 22 plus `GifDraftTest` (6) and `GifEncoderTest` (3). GIF tests cover ordered selection, loop sequences, frame editing, dimensions/timing, and independent ImageIO decoding including LZW dictionary resets and colour quantization. UI and MediaStore coverage remains manual |
 | GIF image selection | **VERIFIED on emulator** — two endpoints + Select between selected four images in displayed order; long-press drag selected nine consecutive images; dragging toward the bottom edge scrolled and extended the selection to 18. Selection works in Pictures and is wired identically inside albums; the album-specific flow still needs a manual pass |
 | GIF editor and export | **VERIFIED on emulator** — duplicate inserted immediately after the active frame, removal restored the four-frame sequence; speed, rotation, square crop and boomerang saved successfully to `Pictures/OneGallery Gifs/`. Independent Pillow decoding: 405×405, six frames, 110 ms each, infinite loop, hashes in A B C D C B order. A nine-image 1080px-canvas export also completed. Reverse preview and pause exercised |
+| GIF frame ceiling (250) | **UNIT-TESTED ONLY — no device pass.** `capSelection` and the `duplicateActive` guard are covered by `GifDraftTest`; the UI half (the chokepoint in `GalleryGridScreen`, the "(max)" header, the disabled duplicate button) has not been run anywhere. The emulator library is too small to reach 250 selectable images, so the first real exercise will be on the Pixel |
 | GIF creator on the owner's Pixel | **USED BY THE OWNER**, 2026-09-21, on the physical Pixel 10 Pro XL against the real 3,132-item library: it works, and he wants unspecified cleanup. This row records that the feature ran on real hardware, nothing more — no timings, and no named defect list yet |
 | GIF rotation and cancellation | **VERIFIED on emulator** — nine-frame draft survived portrait→landscape→portrait; tools scroll beside the preview in landscape. Cancelling an 18-image export with Back returned to the draft; MediaStore and the output directory contained only the two earlier completed GIFs, with no partial file. Large-library / physical-Pixel performance **not measured** |
 | Video clock readout | **VERIFIED on emulator** — one decimal at all times (`0:11.0` / `0:20.0`), playing and paused. The old seconds-vs-milliseconds swap no longer resizes the label. Note the readout is a *display* format only: at 30 fps three consecutive frames can share a tenth, so it cannot be used to count frames (it also shows the requested seek target, not the rendered frame) |
@@ -547,7 +549,9 @@ whatever he actually noticed is not written down anywhere yet.
 - Canvas uses the first image's aspect ratio and fits other images on black. No fill/cover
   mode, background picker, transparency, per-frame durations, or dithering control yet.
 - Selection accepts still images (including a motion photo's still component), not video or
-  animated-GIF expansion. At least two frame instances are retained in the creator.
+  animated-GIF expansion. Between 2 and `MAX_GIF_FRAMES` (250) frame instances are retained.
+  The ceiling is silent: a range fill or sweep past it simply stops growing and the header
+  reads "(max)". There is no dialog, and no way to raise it from the UI.
 - Crop presets place a rectangle; free corner dragging is not aspect-locked, matching the
   existing photo editor. Physical-thumb crop/drag ergonomics, album selection, sharing to an
   external app, and storage/access-failure recovery still need manual coverage.
@@ -707,6 +711,27 @@ Changing either of these back will break things silently, with no error:
 ---
 
 ## 7. Changelog
+
+### 2026-09-21 — a GIF may hold at most 250 frames
+
+The lower bound was 2 and there was no upper one, so "Select between" across a 3,132-item
+library was one tap from a multi-minute export and a file measured in hundreds of megabytes.
+Owner picked 250.
+
+`MAX_GIF_FRAMES` and `capSelection` live in `GifDraft.kt`. The grid routes tap, sweep and
+range fill through a single capped callback rather than capping in three places, and the
+sweep also caps *inside* `extend` — past the ceiling an uncapped proposal keeps growing while
+the result cannot, so the "did this change?" test would fire on every pointer move for the
+rest of the drag. Over the cap the selection header reads "250 selected (max)" and explains
+itself; `duplicateActive` becomes a no-op and its button greys out, mirroring how removal
+already stops at 2. `GifRenderer.save` and `GifCreatorViewModel.open` hold the line for any
+future caller that does not come from the grid.
+
+Note the cap counts *source* frames. A boomerang re-encodes the interior, so 250 frames can
+still mean up to 498 decode-and-encode passes on export.
+
+Two tests added (31 total). **Not run on a device** — the emulator library cannot reach 250
+selectable images, so nothing but the pure functions has been exercised.
 
 ### 2026-09-20 — GIF creator (merged into `main` 2026-09-21 as `7d1b787`)
 
@@ -1053,10 +1078,9 @@ Roughly dependency-ordered. Good first tasks are marked ★.
    on every change. Now the largest remaining structural problem — thumbnail decoding is done.
 1a. **GIF creator cleanup** — deliberately *below* the two items above, which is where the
    owner put it. He has used the feature and wants polish, but has not said what; the first
-   move is to get that list from him rather than to guess from §6.17. The one thing worth
-   fixing unprompted is the missing upper bound on frame count — the lower bound is 2 and
-   there is no upper, while "Select between" over a 3,132-item library can select thousands,
-   at roughly 200 KB and one decode+encode each.
+   move is to get that list from him rather than to guess from §6.17. The frame ceiling that
+   used to head this list is done (250, 2026-09-21) but has only been unit-tested — confirm
+   on the Pixel that a big sweep stops cleanly rather than looking stuck.
 2. **Chase the residual filmstrip stutter** (§6.15) *only if it still bothers you*. Decoding is
    no longer the bottleneck; the next suspect is per-frame recomposition of visible thumbnails
    during a pager drag. Measure on a real library before changing anything.

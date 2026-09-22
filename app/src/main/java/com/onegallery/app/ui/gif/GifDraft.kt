@@ -5,6 +5,19 @@ import kotlin.math.roundToInt
 
 enum class GifLoop { FORWARD, REVERSE, BOOMERANG }
 
+/**
+ * Most frames one GIF may hold.
+ *
+ * Not a memory limit — the encoder streams one bitmap at a time and recycles it. It bounds
+ * time and file size: every frame is a decode, a scale, a median-cut quantization and an LZW
+ * pass, and lands roughly 200 KB in the file. Without it, "Select between" over a few
+ * thousand photos is a single tap away from a multi-minute export and a gigabyte file.
+ *
+ * Counted in *source* frames, which is what the user picks. A boomerang writes the interior
+ * frames a second time, so the export can do up to 2n-2 passes for n frames.
+ */
+const val MAX_GIF_FRAMES = 250
+
 /** Endpoints appear once per cycle: A B C B | A B C B, not A B C C B A. */
 internal fun gifFrameOrder(count: Int, loop: GifLoop): List<Int> = when {
     count <= 0 -> emptyList()
@@ -20,6 +33,20 @@ internal fun selectionBetween(orderedIds: List<Long>, selected: Set<Long>): Set<
     if (positions.size != 2) return selected
     return orderedIds.subList(positions.first(), positions.last() + 1).toSet()
 }
+
+/**
+ * Trims [selection] to [MAX_GIF_FRAMES], keeping the earliest in displayed order.
+ *
+ * Dropping from the end is the predictable half to lose: a sweep or a range fill grows from
+ * its start, so the frames that survive are the ones the gesture began with.
+ *
+ * [orderedIds] is a lambda because this sits in a drag loop. The ordering costs a list of
+ * every displayed id — boxed — and under the ceiling it is never read, so the caller must not
+ * be made to build it on every pointer move to reach an early return.
+ */
+internal fun capSelection(selection: Set<Long>, orderedIds: () -> List<Long>): Set<Long> =
+    if (selection.size <= MAX_GIF_FRAMES) selection
+    else orderedIds().asSequence().filter { it in selection }.take(MAX_GIF_FRAMES).toSet()
 
 data class GifFrame(val key: Long, val uri: String, val name: String)
 
@@ -47,7 +74,7 @@ data class GifDraft(
         }
 
     fun duplicateActive(newKey: Long): GifDraft {
-        if (frames.isEmpty()) return this
+        if (frames.isEmpty() || frames.size >= MAX_GIF_FRAMES) return this
         val result = frames.toMutableList()
         result.add(activeIndex + 1, frames[activeIndex].copy(key = newKey))
         return copy(frames = result, activeIndex = activeIndex + 1)

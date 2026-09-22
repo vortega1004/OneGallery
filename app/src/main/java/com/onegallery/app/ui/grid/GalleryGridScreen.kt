@@ -86,6 +86,8 @@ import com.onegallery.app.ui.theme.DarkSurface
 import com.onegallery.app.ui.theme.DarkTextPrimary
 import com.onegallery.app.ui.theme.DarkTextSecondary
 import com.onegallery.app.ui.theme.OneUIBlue
+import com.onegallery.app.ui.gif.MAX_GIF_FRAMES
+import com.onegallery.app.ui.gif.capSelection
 import com.onegallery.app.ui.gif.selectionBetween
 
 const val TAB_PICTURES = 0
@@ -141,6 +143,11 @@ fun GalleryGridScreen(
         mediaItems.forAlbum(openedAlbumId).sortedBy(mediaSort).filter { it.canBeGifFrame }
     }
     val selectedImages = selectableItems.filter { it.id in selectedImageIds }
+    // Every path that can grow the selection — tap, sweep, range fill — goes through here, so
+    // the frame ceiling is enforced in one place instead of three.
+    val changeSelection: (Set<Long>) -> Unit = { proposed ->
+        onSelectionChange(capSelection(proposed) { selectableItems.map { item -> item.id } })
+    }
     val clearSelection = { onSelectionChange(emptySet()); onSelectionModeChange(false) }
     LaunchedEffect(selectableItems) {
         val available = selectableItems.mapTo(hashSetOf()) { it.id }
@@ -159,7 +166,7 @@ fun GalleryGridScreen(
                 NavigationBar(containerColor = DarkSurface) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                         TextButton(enabled = selectedImages.size == 2, onClick = {
-                            onSelectionChange(selectionBetween(selectableItems.map { it.id }, selectedImageIds))
+                            changeSelection(selectionBetween(selectableItems.map { it.id }, selectedImageIds))
                         }) { Text("Select between") }
                         TextButton(enabled = selectedImages.size >= 2, onClick = { onCreateGif(selectedImages) }) {
                             Text("Create GIF (${selectedImages.size})")
@@ -264,7 +271,7 @@ fun GalleryGridScreen(
                             onRestoreHandled = onRestoreHandled,
                             selectionMode = selectionMode,
                             selectedIds = selectedImageIds,
-                            onSelectionChange = onSelectionChange,
+                            onSelectionChange = changeSelection,
                             onSelectionStart = { onSelectionModeChange(true) },
                             onItemClick = { index -> onItemClick(album.id, index) }
                         )
@@ -322,7 +329,7 @@ fun GalleryGridScreen(
                             onRestoreHandled = onRestoreHandled,
                             selectionMode = selectionMode,
                             selectedIds = selectedImageIds,
-                            onSelectionChange = onSelectionChange,
+                            onSelectionChange = changeSelection,
                             onSelectionStart = { onSelectionModeChange(true) },
                             onItemClick = { index -> onItemClick(null, index) }
                         )
@@ -544,7 +551,9 @@ private fun MediaGrid(
 
 @Composable
 private fun SelectionHeader(count: Int, onClose: () -> Unit) {
-    OneUIHeader("$count selected", "Hold & drag, or select two endpoints and tap Select between", trailing = {
+    val hint = if (count >= MAX_GIF_FRAMES) "Most frames a GIF can hold — deselect to swap one out"
+    else "Hold & drag, or select two endpoints and tap Select between"
+    OneUIHeader(if (count >= MAX_GIF_FRAMES) "$count selected (max)" else "$count selected", hint, trailing = {
         IconButton(onClick = onClose) { Icon(Icons.Rounded.Close, "Cancel selection", tint = Color.White) }
     })
 }

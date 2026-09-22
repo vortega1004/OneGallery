@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.onegallery.app.domain.MediaItem
 import com.onegallery.app.domain.MediaType
+import com.onegallery.app.ui.gif.capSelection
 import kotlinx.coroutines.delay
 
 internal val MediaItem.canBeGifFrame: Boolean
@@ -59,7 +60,12 @@ internal fun imageDragSelection(
         val end = indexAt(point) ?: return
         if (anchor < 0 || end !in latestItems.indices) return
         val range = latestItems.subList(minOf(anchor, end), maxOf(anchor, end) + 1)
-        val selection = baseline + range.filter { it.canBeGifFrame }.map { it.id }
+        // Capped here rather than only at the callback: past the ceiling the proposal keeps
+        // growing while the result cannot, and an uncapped comparison would report a change
+        // on every pointer move for the rest of the sweep.
+        val selection = capSelection(baseline + range.filter { it.canBeGifFrame }.map { it.id }) {
+            latestItems.map { it.id }
+        }
         if (selection != latestSelected) latestOnSelection(selection)
     }
     // Reads current pointer and callbacks instead of restarting the gesture on each selection.

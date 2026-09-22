@@ -34,14 +34,16 @@ class GifCreatorViewModel(application: Application) : AndroidViewModel(applicati
 
     fun open(items: List<MediaItem>) {
         if (items.size < 2 || draft != null) return
-        draft = GifDraft(items.map { GifFrame(nextKey++, it.uri.toString(), it.displayName) })
+        // The grid caps the selection; this keeps the ceiling true for any other caller.
+        val chosen = items.take(MAX_GIF_FRAMES)
+        draft = GifDraft(chosen.map { GifFrame(nextKey++, it.uri.toString(), it.displayName) })
         loading = true
         error = null
         savedUri = null
         job = viewModelScope.launch {
             try {
                 val aspect = withContext(Dispatchers.IO) {
-                    val bitmap = PhotoEditRenderer.decode(getApplication(), items.first().uri, 720)
+                    val bitmap = PhotoEditRenderer.decode(getApplication(), chosen.first().uri, 720)
                     try { bitmap.width.toFloat() / bitmap.height } finally { bitmap.recycle() }
                 }
                 draft = draft?.copy(canvasAspect = aspect)
