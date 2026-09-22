@@ -73,6 +73,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -92,6 +93,7 @@ import com.onegallery.app.data.MediaStoreRepository
 import com.onegallery.app.domain.MediaItem
 import com.onegallery.app.ui.theme.OneUIBlue
 import com.onegallery.app.ui.theme.ShutterFlashColor
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -165,6 +167,34 @@ fun VideoPlayerView(
     // changes height with the phone's width (the step row wraps nothing, but the bars differ).
     var controlsHeightPx by remember { mutableIntStateOf(0) }
 
+    // The area the picture occupies. Decoded stills are scaled to this and no further: a 4K
+    // frame is 33 MB of pixels the screen cannot show, and the cache holds a run of them.
+    var playerSizePx by remember { mutableStateOf(IntSize.Zero) }
+
+    // Frame-stepping state. While [stepIndex] is non-null the page is showing a decoded still
+    // from [frameCache] rather than the player's own output, and every step is a lookup into
+    // frames that are already in memory — see VideoFrameCache for why the player cannot do this.
+    var frameCache by remember(mediaItem.uri) { mutableStateOf<VideoFrameCache?>(null) }
+    var frameCacheChecked by remember(mediaItem.uri) { mutableStateOf(false) }
+    var frameCacheOpened by remember(mediaItem.uri) { mutableStateOf(false) }
+    var stepIndex by remember(mediaItem.uri) { mutableStateOf<Int?>(null) }
+    var stepBitmap by remember(mediaItem.uri) { mutableStateOf<Bitmap?>(null) }
+    // Which frame [stepBitmap] actually is. When it trails [stepIndex] the picture has not
+    // caught up yet, and the readout says so — "is it lagging, or is the next frame identical?"
+    // is the one question a frame-by-frame walk must never leave open.
+    var stepBitmapIndex by remember(mediaItem.uri) { mutableStateOf<Int?>(null) }
+    // Kept so a fast walk cancels the decode it has already outrun instead of queueing behind it
+    var stepJob by remember(mediaItem.uri) { mutableStateOf<Job?>(null) }
+    // Prefetching is deliberately *not* cancelled by the next step. It was, at first, and that
+    // made it useless: during the fast walk it is meant to smooth, every tap killed the decode
+    // that would have fed the tap after it, so each run boundary stalled anyway.
+    var prefetchJob by remember(mediaItem.uri) { mutableStateOf<Job?>(null) }
+    // Steps taken while the cache is still opening, and where they count from. Opening is
+    // asynchronous, so without this the tap that triggers it moves the player *and* the open
+    // separately decides where the walk began — one tap, two moves, and they disagree.
+    var queuedSteps by remember(mediaItem.uri) { mutableIntStateOf(0) }
+    var queuedFromMs by remember(mediaItem.uri) { mutableStateOf<Long?>(null) }
+
     // Where the next frame step counts from, or null to count from wherever the player is.
     //
     // Steps must not measure from exoPlayer.currentPosition during a burst. Held buttons and jog
@@ -224,6 +254,12 @@ fun VideoPlayerView(
             exoPlayer.play()
         } else {
             exoPlayer.pause()
+            // A still left over from a walk would cover the video when this page comes back
+            stepJob?.cancel()
+            prefetchJob?.cancel()
+            stepIndex = null
+            stepBitmap = null
+            stepBitmapIndex = null
         }
     }
 
@@ -284,6 +320,14 @@ fun VideoPlayerView(
         }
     }
 
+    // Tens of megabytes of decoded frames, and a retriever holding the file open.
+    // The instance is captured rather than read inside onDispose: by the time disposal runs,
+    // `frameCache` is already the value that replaced it, and the old one would never close.
+    val cacheToRelease = frameCache
+    DisposableEffect(cacheToRelease) {
+        onDispose { cacheToRelease?.close() }
+    }
+
     /**
      * Puts the player in scrubbing mode for a burst of user-driven seeks.
      *
@@ -299,13 +343,53 @@ fun VideoPlayerView(
         scrubTick++
     }
 
-    // Frame-accurate stepping (buttons and jog strip). Always pauses: single frames are only
-    // meaningful on a still picture. ExoPlayer's default seek mode is already exact.
-    val stepFrames: (Int) -> Unit = { frames ->
-        exoPlayer.pause()
+    /**
+     * Leaves frame-stepping: the player is put where the stepped-to frame is and takes the
+     * picture back.
+     *
+     * The still is held for a moment after the seek. Dropping it the instant playback is asked
+     * for would show the frame the player was parked on before the walk, because the seek it
+     * was just given has not been rendered yet.
+     */
+    val leaveStepping: (Boolean) -> Unit = { keepStillBriefly ->
+        val cache = frameCache
+        val index = stepIndex
+        stepJob?.cancel()
+        stepJob = null
+        prefetchJob?.cancel()
+        prefetchJob = null
+        if (cache != null && index != null) {
+            val position = cache.positionMsFor(index)
+            currentPositionMs = position
+            exoPlayer.seekTo(position)
+        }
+        stepIndex = null
+        if (keepStillBriefly) {
+            coroutineScope.launch {
+                delay(STILL_HANDOVER_MS)
+                stepBitmap = null
+                stepBitmapIndex = null
+            }
+        } else {
+            stepBitmap = null
+            stepBitmapIndex = null
+        }
+    }
+
+    /**
+     * Frame-accurate stepping (buttons and jog strip). Always pauses: single frames are only
+     * meaningful on a still picture.
+     *
+     * Two paths. With a [VideoFrameCache] the walk happens entirely in decoded frames — the
+     * index moves immediately, the picture follows as soon as its bitmap is in hand, and the
+     * player is not touched until the user leaves stepping. Without one (a container whose
+     * frames cannot be addressed by index) it falls back to seeking the player, which is
+     * correct but pays a keyframe re-decode per frame.
+     */
+    val seekStepFrames: (Long, Int) -> Unit = { fromMs, frames ->
         beginScrub()
         val target = frameStepPositionMs(
-            currentMs = stepAnchorMs ?: exoPlayer.currentPosition,
+            currentMs = fromMs,
             frames = frames,
             frameRate = exoPlayer.videoFormat?.frameRate ?: -1f,
             durationMs = durationMs
@@ -314,6 +398,94 @@ fun VideoPlayerView(
         exoPlayer.seekTo(target)
         // The position ticker only runs during playback
         currentPositionMs = target
+    }
+
+    val stepFrames: (Int) -> Unit = { frames ->
+        exoPlayer.pause()
+        val cache = frameCache
+        if (cache == null && !frameCacheOpened) {
+            // The cache is on its way. Bank the step rather than seeking for it — the open will
+            // apply it, and nothing else touches the position in the meantime.
+            if (queuedFromMs == null) queuedFromMs = exoPlayer.currentPosition
+            queuedSteps += frames
+        } else if (cache != null) {
+            val from = stepIndex ?: cache.indexFor(exoPlayer.currentPosition)
+            val target = (from + frames).coerceIn(0, cache.lastIndex)
+            stepIndex = target
+            // The number is the whole point of the readout: it must be true the moment the
+            // button is released, whether or not the picture has caught up yet.
+            currentPositionMs = cache.positionMsFor(target)
+            cache.cached(target)?.let { stepBitmap = it; stepBitmapIndex = target }
+            stepJob?.cancel()
+            stepJob = coroutineScope.launch {
+                val decoded = cache.frameAt(target, frames)
+                if (decoded == null) {
+                    // The probe said this file could be addressed by frame and it cannot after
+                    // all. Hand the walk back to the player rather than leaving the readout
+                    // moving over a picture that is standing still.
+                    if (stepIndex == target) {
+                        stepIndex = null
+                        stepBitmap = null
+                        stepBitmapIndex = null
+                        frameCache = null
+                        exoPlayer.seekTo(cache.positionMsFor(target))
+                    }
+                } else {
+                    if (stepIndex == target) {
+                        stepBitmap = decoded
+                        stepBitmapIndex = target
+                    }
+                    if (prefetchJob?.isActive != true) {
+                        prefetchJob = coroutineScope.launch { cache.prefetch(target, frames) }
+                    }
+                }
+            }
+        } else {
+            seekStepFrames(stepAnchorMs ?: exoPlayer.currentPosition, frames)
+        }
+    }
+
+    /**
+     * Opens the frame cache the first time the user asks for a frame, not when the page is
+     * composed.
+     *
+     * Scrubbing the filmstrip composes every video page it passes; opening a retriever and
+     * decoding a probe frame for each of them would cost more than the feature saves.
+     */
+    val beginStepping: () -> Unit = {
+        if (!frameCacheChecked) {
+            frameCacheChecked = true
+            coroutineScope.launch {
+                val opened = VideoFrameCache.open(
+                    context = context,
+                    uri = mediaItem.uri,
+                    maxWidth = maxOf(playerSizePx.width, 1),
+                    maxHeight = maxOf(playerSizePx.height, 1)
+                )
+                val from = queuedFromMs ?: exoPlayer.currentPosition
+                val steps = queuedSteps
+                queuedFromMs = null
+                queuedSteps = 0
+                frameCache = opened
+                frameCacheOpened = true
+                if (opened != null) {
+                    val index = (opened.indexFor(from) + steps).coerceIn(0, opened.lastIndex)
+                    stepIndex = index
+                    currentPositionMs = opened.positionMsFor(index)
+                    val decoded = opened.frameAt(index, if (steps < 0) -1 else 1)
+                    if (stepIndex == index) {
+                        stepBitmap = decoded
+                        stepBitmapIndex = index
+                    }
+                    prefetchJob = coroutineScope.launch {
+                        opened.prefetch(index, if (steps < 0) -1 else 1)
+                    }
+                } else if (steps != 0) {
+                    // No frame-index access on this file: the banked steps are owed either way
+                    seekStepFrames(from, steps)
+                }
+            }
+        }
     }
 
     /**
@@ -330,6 +502,7 @@ fun VideoPlayerView(
 
     val resumePlayback: () -> Unit = {
         if (exoPlayer.isScrubbingModeEnabled) exoPlayer.setScrubbingModeEnabled(false)
+        leaveStepping(true)
         exoPlayer.play()
     }
 
@@ -349,7 +522,10 @@ fun VideoPlayerView(
             snapshotManager.captureCurrentFrame(
                 textureView = textureViewRef,
                 videoItem = mediaItem,
-                currentPositionMs = exoPlayer.currentPosition
+                // While stepping, the player is still parked where the walk began; the frame
+                // the user is looking at — and means to capture — is the stepped-to one.
+                currentPositionMs = stepIndex?.let { frameCache?.positionMsFor(it) }
+                    ?: exoPlayer.currentPosition
             ) { thumbnail ->
                 capturedThumb = thumbnail
                 captureCount++
@@ -362,6 +538,7 @@ fun VideoPlayerView(
         modifier = modifier
             .fillMaxSize()
             .background(Color.Black)
+            .onSizeChanged { playerSizePx = it }
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null
@@ -395,6 +572,18 @@ fun VideoPlayerView(
         if (!firstFrameRendered) {
             AsyncImage(
                 model = rememberThumbnailRequest(mediaItem.uri),
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+
+        // The frame being stepped to, decoded ahead of time and drawn over the player's own
+        // output. The player is left parked where the walk began until the user leaves
+        // stepping, because moving it is the expensive thing this whole path exists to avoid.
+        stepBitmap?.let { bitmap ->
+            Image(
+                bitmap = remember(bitmap) { bitmap.asImageBitmap() },
                 contentDescription = null,
                 contentScale = ContentScale.Fit,
                 modifier = Modifier.fillMaxSize()
@@ -490,12 +679,30 @@ fun VideoPlayerView(
                         style = GhostTextStyle,
                         modifier = Modifier.weight(1f, fill = false)
                     )
-                    val stats = remember(frameRate, durationMs) { formatClipStats(durationMs, frameRate) }
+                    // Walking frame by frame, the frame number replaces the clip's summary and
+                    // is shown brighter: it is the only way to tell "the next frame" from "the
+                    // same frame, still decoding". It updates the instant the button is
+                    // released, ahead of the picture.
+                    val walkedIndex = stepIndex
+                    val cacheForStats = frameCache
+                    val walkedLabel =
+                        if (walkedIndex != null && cacheForStats != null) {
+                            // One-based: nobody counts the first frame as frame zero. The
+                            // ellipsis means the number has moved and the picture has not yet.
+                            val catchingUp = stepBitmapIndex != walkedIndex
+                            "frame ${walkedIndex + 1} / ${cacheForStats.frameCount}" +
+                                if (catchingUp) " …" else ""
+                        } else {
+                            null
+                        }
+                    val walking = walkedLabel != null
+                    val stats = walkedLabel
+                        ?: formatClipStats(durationMs, frameRate, cacheForStats?.frameCount ?: 0)
                     if (stats != null) {
                         Text(
                             text = stats,
-                            color = GhostContentDim,
-                            fontSize = 10.sp,
+                            color = if (walking) GhostContent else GhostContentDim,
+                            fontSize = if (walking) 12.sp else 10.sp,
                             maxLines = 1,
                             softWrap = false,
                             style = GhostTextStyle,
@@ -515,7 +722,9 @@ fun VideoPlayerView(
                     FrameJogStrip(
                         onScrubStart = {
                             exoPlayer.pause()
-                            beginScrub()
+                            beginStepping()
+                            // Only the fallback path seeks, and only it needs a warm codec
+                            if (frameCache == null) beginScrub()
                         },
                         onStepFrames = { frames ->
                             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
@@ -528,12 +737,12 @@ fun VideoPlayerView(
                     GhostRepeatButton(
                         icon = Icons.Rounded.SkipPrevious,
                         contentDescription = "Previous frame",
-                        onStep = { stepFrames(-1) }
+                        onStep = { beginStepping(); stepFrames(-1) }
                     )
                     GhostRepeatButton(
                         icon = Icons.Rounded.SkipNext,
                         contentDescription = "Next frame",
-                        onStep = { stepFrames(1) }
+                        onStep = { beginStepping(); stepFrames(1) }
                     )
                     // 1-tap frame capture, in the corner the right thumb rests on
                     GhostIconButton(
@@ -573,8 +782,16 @@ fun VideoPlayerView(
                     Slider(
                         value = (seekPositionMs ?: currentPositionMs.toFloat()).coerceIn(0f, maxPositionMs),
                         onValueChange = { newPos ->
-                            // Same warm-codec path the frame steps use: a drag is dozens of
-                            // exact seeks in a row
+                            // Dragging the bar abandons any frame walk outright: it is about to
+                            // seek the player anyway, so there is nothing to hand back.
+                            if (stepIndex != null) {
+                                stepJob?.cancel()
+                                stepIndex = null
+                                stepBitmap = null
+                                stepBitmapIndex = null
+                            }
+                            // Same warm-codec path the fallback frame steps use: a drag is
+                            // dozens of exact seeks in a row
                             beginScrub()
                             seekPositionMs = newPos
                             // Stepping after a drag continues from where the drag left off
@@ -582,7 +799,19 @@ fun VideoPlayerView(
                             exoPlayer.seekTo(newPos.toLong())
                         },
                         onValueChangeFinished = {
-                            seekPositionMs?.let { currentPositionMs = it.toLong() }
+                            seekPositionMs?.let { dragged ->
+                                // Land on a frame boundary where the boundaries are known, so a
+                                // walk started right after a drag begins on the frame that is
+                                // actually on screen rather than the one before it.
+                                val cache = frameCache
+                                val settledMs = if (cache != null) {
+                                    cache.positionMsFor(cache.nearestIndexFor(dragged.toLong()))
+                                } else {
+                                    dragged.toLong()
+                                }
+                                currentPositionMs = settledMs
+                                if (settledMs != dragged.toLong()) exoPlayer.seekTo(settledMs)
+                            }
                             seekPositionMs = null
                             endScrub()
                         },
@@ -610,7 +839,16 @@ fun VideoPlayerView(
                     GhostIconButton(
                         icon = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                         contentDescription = if (isPlaying) "Pause" else "Play",
-                        onClick = { if (isPlaying) exoPlayer.pause() else resumePlayback() },
+                        // Pausing is the tell that frames are about to be walked: getting the
+                        // cache open now is what makes the first step feel like the rest.
+                        onClick = {
+                            if (isPlaying) {
+                                exoPlayer.pause()
+                                beginStepping()
+                            } else {
+                                resumePlayback()
+                            }
+                        },
                         size = 48.dp,
                         iconSize = 26.dp
                     )
@@ -639,6 +877,14 @@ private const val ACTIVATION_DELAY_MS = 150L
 private const val SCRUBBING_IDLE_MS = 900L
 
 /**
+ * How long the stepped-to still is kept after handing the picture back to the player.
+ *
+ * The player has just been given a seek and has not rendered it yet; dropping the still on the
+ * same frame would show the position the walk started from for as long as that seek takes.
+ */
+private const val STILL_HANDOVER_MS = 150L
+
+/**
  * m:ss.t — the only clock format in the player.
  *
  * One fixed format, because swapping between seconds and milliseconds changed the label's width
@@ -663,15 +909,18 @@ private fun formatTime(ms: Long): String {
 /**
  * "29.97 fps  ·  1,847 frames", or null when the decoder has not reported a frame rate.
  *
- * The count is duration x rate: exact for constant-rate footage, an estimate for anything
- * variable, which is the same assumption [frameStepPositionMs] makes when it steps. Nothing is
- * shown at all rather than a plausible-looking number derived from a default rate.
+ * [exactFrameCount] comes from the container's own metadata and is preferred whenever it is
+ * available. Failing that the count is duration x rate: exact for constant-rate footage, an
+ * estimate for anything variable, which is the same assumption [frameStepPositionMs] makes when
+ * it steps. Nothing is shown at all rather than a plausible-looking number from a default rate.
  */
-private fun formatClipStats(durationMs: Long, frameRate: Float): String? {
+private fun formatClipStats(durationMs: Long, frameRate: Float, exactFrameCount: Int): String? {
     if (frameRate <= 0f || durationMs <= 0L) return null
     val rate = if (abs(frameRate - frameRate.roundToInt()) < 0.01f) frameRate.roundToInt().toString()
     else String.format(Locale.US, "%.2f", frameRate)
-    val frames = (durationMs / 1000.0 * frameRate).roundToLong()
+    val frames =
+        if (exactFrameCount > 0) exactFrameCount.toLong()
+        else (durationMs / 1000.0 * frameRate).roundToLong()
     return String.format(Locale.US, "%s fps  ·  %,d frames", rate, frames)
 }
 

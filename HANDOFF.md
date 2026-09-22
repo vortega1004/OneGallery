@@ -1,6 +1,9 @@
 # OneGallery — Engineering Handoff
 
-**Last verified:** 2026-09-21 — the viewer no longer resizes when its chrome toggles, taps
+**Last verified:** 2026-09-21 — frame stepping no longer seeks the player: frames are
+decoded in runs and walked out of memory, with the frame number on screen. Measured on the
+AVD against a 4K clip: **2.5–3.7 s per step before, under the 0.85 s measurement floor after**.
+Before that, the viewer stopped resizing when its chrome toggles, taps
 that miss a video control do nothing, and videos carry a name/fps/frame-count line. All three
 exercised on the `Pixel_9_Pro_XL` AVD against a clip with burned-in frame numbers. Before
 that, the GIF frame count was capped at 250 (unit-tested only), and the GIF creator
@@ -9,7 +12,7 @@ that, the GIF frame count was capped at 250 (unit-tested only), and the GIF crea
 builds and 29 unit tests pass; GIF creation was exercised on the `Pixel_9_Pro_XL` AVD and
 then by hand on the device. The feature has had **no external review** — the `REVIEWER.md`
 round covered the video change only.
-**Status:** Debug and release builds pass, 29 unit tests pass per variant. Earlier work
+**Status:** Debug and release builds pass, 36 unit tests pass per variant. Earlier work
 was smoke-tested on the emulator and on a physical
 Pixel 10 Pro XL against a real 3,132-item library. Video frame capture works on real
 hardware. Two performance problems appear only at that scale (§6.15, §6.16). See §1 for
@@ -118,9 +121,13 @@ crashes** on either. Anything the emulator's tiny library cannot exercise is cal
 | Sorting (albums + media) | **VERIFIED on emulator** — all options present, orders correct, grid/viewer indices stay aligned after a re-sort, selection survives the viewer. "Date taken" vs "Date added" divergence **NOT verifiable on the emulator**: every test file has a null EXIF capture time, so `dateTaken` falls back to `dateAdded` and the two orders coincide by definition |
 | Thumbnail decoding | **VERIFIED firing** on emulator (fetch path instrumented and counted); **speedup only measurable on real photos** — emulator test images are 480×360, so there is nothing to save. Owner reports stutter "mostly gone" on the Pixel |
 | Launcher icon | **VERIFIED** — adaptive icon renders correctly under the launcher mask |
-| Automated tests | **31 JVM unit tests pass per variant** (`gradlew.bat test`): the previous 22 plus `GifDraftTest` (6) and `GifEncoderTest` (3). GIF tests cover ordered selection, loop sequences, frame editing, dimensions/timing, and independent ImageIO decoding including LZW dictionary resets and colour quantization. UI and MediaStore coverage remains manual |
+| Automated tests | **36 JVM unit tests pass per variant** (`gradlew.bat test`): the previous 22 plus `GifDraftTest` (6) and `GifEncoderTest` (3). GIF tests cover ordered selection, loop sequences, frame editing, dimensions/timing, and independent ImageIO decoding including LZW dictionary resets and colour quantization. UI and MediaStore coverage remains manual |
 | GIF image selection | **VERIFIED on emulator** — two endpoints + Select between selected four images in displayed order; long-press drag selected nine consecutive images; dragging toward the bottom edge scrolled and extended the selection to 18. Selection works in Pictures and is wired identically inside albums; the album-specific flow still needs a manual pass |
 | GIF editor and export | **VERIFIED on emulator** — duplicate inserted immediately after the active frame, removal restored the four-frame sequence; speed, rotation, square crop and boomerang saved successfully to `Pictures/OneGallery Gifs/`. Independent Pillow decoding: 405×405, six frames, 110 ms each, infinite loop, hashes in A B C D C B order. A nine-image 1080px-canvas export also completed. Reverse preview and pause exercised |
+| Frame stepping is off the seek path | **MEASURED on emulator, 4K clip with a 2 s GOP.** One tap, time until the picture changes, five trials each: the old seek path took 2.48 / 2.53 / 2.56 / 3.11 / 3.72 s; the new one had already changed by the first poll every time, and a poll costs ~0.85 s, so its latency is *below what this method can see* rather than measured. Same emulator, same clip, same taps |
+| Frame stepping is exact | **VERIFIED on emulator** against burned-in frame numbers. 720p: 150 → ten taps → 160 → one back → 159 → ten back → 149, with the readout naming the frame on screen at every stop. 4K: a step after a seek-bar drag goes 93 → 94, which is the off-by-one that used to cost a wasted tap. Twenty rapid taps move twenty frames |
+| The frame readout | **VERIFIED on emulator** — `frame 446 / 600` against burned-in 445 (the readout is one-based), and `frame 238 / 240` on the 4K clip. The count is the container's own `METADATA_KEY_VIDEO_FRAME_COUNT`, not duration × rate. An ellipsis appears when the number has moved and the picture has not caught up yet |
+| 4K frames do not exhaust memory | **VERIFIED on emulator** — a 3840×2160 clip opens, steps and walks without an OOM, because the decode run shrinks to two frames at that size. **Not** verified against 4K60 HEVC, which is what the Pixel actually shoots |
 | Viewer never resizes when the chrome toggles | **VERIFIED on emulator, pixel-exact.** Paused clip, screenshot with the chrome on and off, compared the bounding box of the burned-in frame number: identical to the pixel (450, 1178, 892, 1375). Same test on a still: identical (130, 502, 1214, 2463). The band is reserved whether the bar is drawn or not |
 | A tap that misses a video control does nothing | **VERIFIED on emulator** — six dead spots probed (the detail line, the gap between the two control rows, the far left of the playback row, between the frame-step buttons, between shutter and mute, above the jog strip) and the chrome stayed up for all six. Before the change the row gap hid it. Tapping the picture still toggles, and the top bar no longer toggles either |
 | Video controls still work under the tap swallow | **VERIFIED on emulator** — three consecutive bursts of ten rapid next-frame taps moved exactly +10, +10, +10 rendered frames; ten spaced taps +10; jog 336 px right then left went 283 → 275 → 283 (right still steps backward). A sideways swipe started inside the cluster still pages |
@@ -250,6 +257,7 @@ app/src/main/
         ├── editor/PhotoEditorScreen.kt           # Editor UI: crop & rotate, adjust, save copy
         ├── filmstrip/FilmStripInfinityViewer.kt  # Compose filmstrip, 1:1 synced with the pager
         ├── video/VideoPlayerView.kt              # Media3 PlayerView + capture shutter UI
+        ├── video/VideoFrameCache.kt              # Frame-indexed decode in runs, for stepping
         ├── video/GhostVideoControls.kt           # Ghost buttons, frame jog strip, frame-step math
         ├── video/VideoSnapshotManager.kt         # Dual-path frame extraction
         └── theme/{Color,Theme}.kt                # One UI palettes
@@ -346,6 +354,22 @@ given that same height explicitly, so the two cannot drift apart.
 page toggles its chrome on tap, so the gaps between ghost buttons used to dismiss the controls
 the user was reaching for. It is the *press* that must be consumed — see §6a, this is not
 interchangeable with consuming the release.
+
+**Frame stepping does not use the player.** `VideoFrameCache` decodes runs of consecutive
+frames through `MediaMetadataRetriever.getFramesAtIndex` and keeps them, scaled to the display
+area and flattened to RGB_565, in an LRU. While a walk is in progress the page draws that
+still over the player's own output and `ExoPlayer` is left parked where the walk began; it is
+seeked once, on the way out. Stepping is then an index change and a bitmap lookup, and
+reversing direction is free because the frame behind you is still in memory.
+
+The player cannot do this itself. An exact seek re-decodes from the previous sync sample, and
+scrubbing mode does not help — `ScrubbingModeParameters.DEFAULT` already enables every flag it
+has (verified in the 1.8.0 bytecode), so the re-decode is the irreducible cost. Single-frame
+stepping is the worst possible case for it: the whole GOP, per frame.
+
+Three constraints shape the cache, all of them in §6a: the run length has to shrink for large
+frames, the index ↔ timestamp mapping has two different correct answers depending on how the
+position was arrived at, and prefetching must outlive the step that started it.
 
 **Video seeking:** exact seeks are the default and frame stepping needs them, but each one
 restarts decoding at the previous keyframe. Two things make that usable. The player is put in
@@ -736,6 +760,21 @@ Changing either of these back will break things silently, with no error:
   `FilmStripHeight + ViewerActionRowHeight` from the page and hands the bar the same number.
   Change the filmstrip's thumbnail size or the action row's height without changing those
   constants and the picture silently sits over, or short of, the bar. (§4)
+- **`getFramesAtIndex` materialises the whole run at once.** It returns a `List<Bitmap>`, so
+  every frame in the run exists at full resolution simultaneously — 33 MB each at 4K, a quarter
+  of a gigabyte for a run of eight, on exactly the footage a phone shoots. `VideoFrameCache`
+  therefore sizes the run from the source dimensions (eight at 1080p, two at 4K). A fixed run
+  length looks fine on a 720p test clip and kills the process on real video. (§4)
+- **"Which frame is this position?" has two correct answers.** After an exact seek the player
+  shows the first frame at or *after* the requested position; during playback it is the last
+  frame at or *before* it. `frameIndexAt` answers the second, so a walk entered straight after
+  a seek-bar drag began one frame behind the picture and the first tap appeared to do nothing.
+  Fixed by snapping the drag itself to a frame boundary (`nearestFrameIndexAt`) rather than by
+  guessing how the position was reached. Both are unit-tested in `FrameIndexTest`. (§4)
+- **Prefetching must not be cancelled by the next step.** It was, at first — one job served
+  both the demanded frame and the read-ahead — so during exactly the fast walk it exists to
+  smooth, every tap killed the decode that would have fed the tap after it. Separate jobs, and
+  only the demanded-frame one is cancellable. (§4)
 - **Grid state must stay hoisted in `GalleryApp`.** The viewer replaces the grid in the
   composition rather than stacking on it, so anything remembered inside `GalleryGridScreen` is
   destroyed when a photo opens. (§4)
@@ -743,6 +782,34 @@ Changing either of these back will break things silently, with no error:
 ---
 
 ## 7. Changelog
+
+### 2026-09-21 — frame stepping stops seeking
+
+Owner: *"The video scrubbing and frame by frame buttons are so slowwww. Sometimes when I keep
+hitting the frame forward button I need to hit the back frame button 2 times to actually go
+back. I never know if its lagging or if the previous frame is actually just the same frame."*
+
+Three complaints, two causes. The speed was the seek: every step re-decoded from the previous
+keyframe, and scrubbing mode had nothing left to give (its DEFAULT already sets every flag —
+checked in the 1.8.0 bytecode). The "hit back twice" was an off-by-one entering a walk from a
+seek-bar position. The third was not a bug at all but a missing readout: with nothing on screen
+naming the frame, a slow step and an identical frame look the same.
+
+`VideoFrameCache` decodes runs of consecutive frames by index and keeps them scaled and in
+memory; a walk draws those stills over the player and touches `ExoPlayer` once, on exit. The
+frame number is on screen throughout, one-based, over the container's exact frame count, with
+an ellipsis while the picture is catching up to a number that has already moved. Seek-bar drags
+now land on frame boundaries. The seek path is still there for containers that cannot be
+addressed by frame, and for a decode that fails after opening.
+
+Measured on the AVD against a 4K clip with a 2 s GOP — one tap, time to the picture changing,
+five trials each: **2.48 / 2.53 / 2.56 / 3.11 / 3.72 s before; after, already changed by the
+first poll every time**, and a poll costs about 0.85 s, so the new figure is a ceiling rather
+than a measurement. Frame-exactness was checked against burned-in frame numbers at 720p and 4K.
+Five unit tests added for the index maths (36 total).
+
+**Still unmeasured on the owner's Pixel**, which is where it matters; the emulator decodes in
+software. 4K60 HEVC in particular is untested — §8 item 0.
 
 ### 2026-09-21 — the viewer holds still
 
@@ -1121,11 +1188,14 @@ Still unexercised on-device: the viewer, filmstrip sync, and video frame capture
 
 Roughly dependency-ordered. Good first tasks are marked ★.
 
-0. ★ **Measure frame-step latency on the Pixel.** The 2026-09-20 change added scrubbing mode
-   for exactly this and **no latency number exists for it anywhere** — the AVD decodes in
-   software (§5a). Until someone times it on hardware, the speed half of that fix is
-   unsubstantiated. Same run should cover the scrub change from PR #2 (§6.15) — keep or revert
-   on numbers. Tune the one-handed control constants (`GhostVideoControls.kt`,
+0. ★ **Measure frame stepping on the Pixel.** The 2026-09-21 rework took stepping off the
+   player's seek path entirely and is 3–4× faster on the AVD (§1), but the AVD decodes in
+   software and the owner's footage is 4K60 HEVC, which nothing here has touched. Two things
+   to watch on hardware: how long `VideoFrameCache.open` takes on a long clip (it runs on the
+   first pause and decodes a probe frame), and whether a run of two 4K frames decodes fast
+   enough that holding the step button stays smooth. If it does not, the run length and
+   `PREFETCH_MARGIN` are the dials. Same run should cover the scrub change from PR #2 (§6.15) —
+   keep or revert on numbers. Tune the one-handed control constants (`GhostVideoControls.kt`,
    `SwipeUpGesture.kt`) if reach or sensitivity is off.
 1. ★ **Paginate the library load** (§6.16). `queryMediaItems` pulls all 3,132 rows into memory
    on every change. Now the largest remaining structural problem — thumbnail decoding is done.
