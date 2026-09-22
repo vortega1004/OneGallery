@@ -13,6 +13,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -47,6 +49,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -69,6 +72,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -76,12 +80,14 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.media3.common.MediaItem as ExoMediaItem
 import androidx.media3.common.Player
+import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.ScrubbingModeParameters
 import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
 import com.onegallery.app.ui.common.rememberThumbnailRequest
+import com.onegallery.app.ui.common.swallowTaps
 import com.onegallery.app.data.MediaStoreRepository
 import com.onegallery.app.domain.MediaItem
 import com.onegallery.app.ui.theme.OneUIBlue
@@ -89,6 +95,9 @@ import com.onegallery.app.ui.theme.ShutterFlashColor
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
+import kotlin.math.abs
+import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 
 /**
  * Replicates Samsung Video Viewer with 1-Tap Instant Frame Capture:
@@ -131,6 +140,9 @@ fun VideoPlayerView(
     var isPlaying by remember { mutableStateOf(false) }
     var currentPositionMs by remember { mutableLongStateOf(0L) }
     var durationMs by remember { mutableLongStateOf(mediaItem.durationMs) }
+    // Reported by the decoder rather than assumed. Only the detail line reads this; frame
+    // stepping asks the player directly, because it needs the rate at the moment it steps.
+    var frameRate by remember(mediaItem.uri) { mutableFloatStateOf(0f) }
     // Non-null while the user drags the scrubber, so the thumb follows the finger, not the ticker
     var seekPositionMs by remember { mutableStateOf<Float?>(null) }
     var resumeOnStart by remember { mutableStateOf(false) }
@@ -182,7 +194,13 @@ fun VideoPlayerView(
                 override fun onPlaybackStateChanged(state: Int) {
                     if (state == Player.STATE_READY) {
                         durationMs = duration
+                        frameRate = videoFormat?.frameRate ?: 0f
                     }
+                }
+
+                // Some codecs publish the format after STATE_READY, so take the later word for it
+                override fun onVideoSizeChanged(videoSize: VideoSize) {
+                    videoFormat?.frameRate?.let { frameRate = it }
                 }
 
                 override fun onRenderedFirstFrame() {
@@ -433,8 +451,8 @@ fun VideoPlayerView(
         // the controls.
         AnimatedVisibility(
             visible = controlsVisible,
-            enter = fadeIn(),
-            exit = fadeOut(),
+            enter = fadeIn() + slideInVertically { it / 3 },
+            exit = fadeOut() + slideOutVertically { it / 3 },
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
@@ -447,10 +465,45 @@ fun VideoPlayerView(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .onSizeChanged { controlsHeightPx = it.height },
+                    .onSizeChanged { controlsHeightPx = it.height }
+                    // A tap that lands in the cluster but misses a control does nothing at all.
+                    // The page toggles its chrome on tap, so the gaps between these buttons used
+                    // to dismiss the very controls the user was reaching for.
+                    .swallowTaps(),
                 horizontalAlignment = Alignment.End,
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
+                // What this file is, and the two numbers worth knowing while stepping through
+                // it. The name yields first: it is the part that can be arbitrarily long, and
+                // the numbers are the reason the line is here at all.
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = mediaItem.displayName,
+                        color = GhostContentDim,
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        style = GhostTextStyle,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    val stats = remember(frameRate, durationMs) { formatClipStats(durationMs, frameRate) }
+                    if (stats != null) {
+                        Text(
+                            text = stats,
+                            color = GhostContentDim,
+                            fontSize = 10.sp,
+                            maxLines = 1,
+                            softWrap = false,
+                            style = GhostTextStyle,
+                            modifier = Modifier.padding(start = 8.dp)
+                        )
+                    }
+                }
+
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -553,12 +606,13 @@ fun VideoPlayerView(
                         style = GhostTextStyle
                     )
 
+                    // The most-used control in the cluster, and the one reported missed
                     GhostIconButton(
                         icon = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                         contentDescription = if (isPlaying) "Pause" else "Play",
                         onClick = { if (isPlaying) exoPlayer.pause() else resumePlayback() },
-                        size = 44.dp,
-                        iconSize = 24.dp
+                        size = 48.dp,
+                        iconSize = 26.dp
                     )
 
                     GhostIconButton(
@@ -604,6 +658,21 @@ private fun formatTime(ms: Long): String {
         (clamped / 1000) % 60,
         (clamped % 1000) / 100
     )
+}
+
+/**
+ * "29.97 fps  ·  1,847 frames", or null when the decoder has not reported a frame rate.
+ *
+ * The count is duration x rate: exact for constant-rate footage, an estimate for anything
+ * variable, which is the same assumption [frameStepPositionMs] makes when it steps. Nothing is
+ * shown at all rather than a plausible-looking number derived from a default rate.
+ */
+private fun formatClipStats(durationMs: Long, frameRate: Float): String? {
+    if (frameRate <= 0f || durationMs <= 0L) return null
+    val rate = if (abs(frameRate - frameRate.roundToInt()) < 0.01f) frameRate.roundToInt().toString()
+    else String.format(Locale.US, "%.2f", frameRate)
+    val frames = (durationMs / 1000.0 * frameRate).roundToLong()
+    return String.format(Locale.US, "%s fps  ·  %,d frames", rate, frames)
 }
 
 private fun findTextureView(viewGroup: ViewGroup): TextureView? {

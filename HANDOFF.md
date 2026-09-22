@@ -1,7 +1,10 @@
 # OneGallery — Engineering Handoff
 
-**Last verified:** 2026-09-21 — GIF frame count capped at 250 (builds clean, 31 unit
-tests pass, **not exercised on a device**). Before that, GIF creator **merged into `main`**
+**Last verified:** 2026-09-21 — the viewer no longer resizes when its chrome toggles, taps
+that miss a video control do nothing, and videos carry a name/fps/frame-count line. All three
+exercised on the `Pixel_9_Pro_XL` AVD against a clip with burned-in frame numbers. Before
+that, the GIF frame count was capped at 250 (unit-tested only), and the GIF creator
+**merged into `main`**
 (`7d1b787`, fast-forward) after the owner used it on their Pixel and reported it working. Debug/release
 builds and 29 unit tests pass; GIF creation was exercised on the `Pixel_9_Pro_XL` AVD and
 then by hand on the device. The feature has had **no external review** — the `REVIEWER.md`
@@ -118,6 +121,10 @@ crashes** on either. Anything the emulator's tiny library cannot exercise is cal
 | Automated tests | **31 JVM unit tests pass per variant** (`gradlew.bat test`): the previous 22 plus `GifDraftTest` (6) and `GifEncoderTest` (3). GIF tests cover ordered selection, loop sequences, frame editing, dimensions/timing, and independent ImageIO decoding including LZW dictionary resets and colour quantization. UI and MediaStore coverage remains manual |
 | GIF image selection | **VERIFIED on emulator** — two endpoints + Select between selected four images in displayed order; long-press drag selected nine consecutive images; dragging toward the bottom edge scrolled and extended the selection to 18. Selection works in Pictures and is wired identically inside albums; the album-specific flow still needs a manual pass |
 | GIF editor and export | **VERIFIED on emulator** — duplicate inserted immediately after the active frame, removal restored the four-frame sequence; speed, rotation, square crop and boomerang saved successfully to `Pictures/OneGallery Gifs/`. Independent Pillow decoding: 405×405, six frames, 110 ms each, infinite loop, hashes in A B C D C B order. A nine-image 1080px-canvas export also completed. Reverse preview and pause exercised |
+| Viewer never resizes when the chrome toggles | **VERIFIED on emulator, pixel-exact.** Paused clip, screenshot with the chrome on and off, compared the bounding box of the burned-in frame number: identical to the pixel (450, 1178, 892, 1375). Same test on a still: identical (130, 502, 1214, 2463). The band is reserved whether the bar is drawn or not |
+| A tap that misses a video control does nothing | **VERIFIED on emulator** — six dead spots probed (the detail line, the gap between the two control rows, the far left of the playback row, between the frame-step buttons, between shutter and mute, above the jog strip) and the chrome stayed up for all six. Before the change the row gap hid it. Tapping the picture still toggles, and the top bar no longer toggles either |
+| Video controls still work under the tap swallow | **VERIFIED on emulator** — three consecutive bursts of ten rapid next-frame taps moved exactly +10, +10, +10 rendered frames; ten spaced taps +10; jog 336 px right then left went 283 → 275 → 283 (right still steps backward). A sideways swipe started inside the cluster still pages |
+| Clip detail line | **VERIFIED on emulator** — reads `framenum.mp4  30 fps · 600 frames`; `ffprobe` on the same file reports 30/1 and 600 frames. Long names are untested against a real camera roll: the name is the part that truncates, by construction |
 | GIF frame ceiling (250) | **UNIT-TESTED ONLY — no device pass.** `capSelection` and the `duplicateActive` guard are covered by `GifDraftTest`; the UI half (the chokepoint in `GalleryGridScreen`, the "(max)" header, the disabled duplicate button) has not been run anywhere. The emulator library is too small to reach 250 selectable images, so the first real exercise will be on the Pixel |
 | GIF creator on the owner's Pixel | **USED BY THE OWNER**, 2026-09-21, on the physical Pixel 10 Pro XL against the real 3,132-item library: it works, and he wants unspecified cleanup. This row records that the feature ran on real hardware, nothing more — no timings, and no named defect list yet |
 | GIF rotation and cancellation | **VERIFIED on emulator** — nine-frame draft survived portrait→landscape→portrait; tools scroll beside the preview in landscape. Cancelling an 18-image export with Back returned to the draft; MediaStore and the output directory contained only the two earlier completed GIFs, with no partial file. Large-library / physical-Pixel performance **not measured** |
@@ -232,6 +239,7 @@ app/src/main/
     ├── domain/MediaItem.kt       # Models, toAlbums(), AlbumSort/MediaSort + their sorts
     └── ui/
         ├── common/MediaImageRequests.kt          # Coil requests: thumbnail stand-in, full-size + placeholder
+        ├── common/PointerModifiers.kt            # swallowTaps(): a miss inside a control cluster does nothing
         ├── grid/GalleryGridScreen.kt             # Grid, Albums folders, sort menus, bottom nav
         ├── viewer/MediaViewerScreen.kt           # HorizontalPager + zoomable image + overlays + editor overlay
         ├── viewer/MediaDetailsSheet.kt           # ModalBottomSheet: MediaStore fields + async EXIF
@@ -325,6 +333,19 @@ match the grid that was on screen when the photo was tapped, and the two diverge
 user backs out into a differently-sorted folder. And the first composition sees the defaults
 before DataStore's first emission arrives, which is exactly why the grid's scroll-to-top is
 wired to sort *events* rather than to a `LaunchedEffect` on the sort value.
+
+**The viewer's picture area is a fixed rectangle.** Full height minus a bottom band that is
+always reserved — `FilmStripHeight + ViewerActionRowHeight +` the navigation-bar inset. The
+chrome slides over a layout that has already settled rather than re-measuring the page, because
+a viewer that resizes under a mis-tap is worse than one that wastes a band of black. The band is
+*derived from constants*, not measured: `AnimatedVisibility` reports zero height until its first
+layout pass, so a measured reservation jumps exactly where the viewer opens. The bar is then
+given that same height explicitly, so the two cannot drift apart.
+
+**Taps inside a control cluster are swallowed** (`ui/common/PointerModifiers.kt`). The video
+page toggles its chrome on tap, so the gaps between ghost buttons used to dismiss the controls
+the user was reaching for. It is the *press* that must be consumed — see §6a, this is not
+interchangeable with consuming the release.
 
 **Video seeking:** exact seeks are the default and frame stepping needs them, but each one
 restarts decoding at the previous keyframe. Two things make that usable. The player is put in
@@ -704,6 +725,17 @@ Changing either of these back will break things silently, with no error:
   burned-in frame numbers — 10 rapid taps move exactly 10 rendered frames, in both directions.
   Do **not** try to confirm this from the on-screen clock: it is tenths, and it displays the
   requested target rather than the rendered frame. (§4, §1)
+- **To stop a tap reaching an ancestor, consume the press, not the release.**
+  `waitForUpOrCancellation` tests for an up *before* it tests for consumption, so it hands the
+  release back to the ancestor's `clickable` whether or not a child consumed it; `clickable`
+  starts instead with `awaitFirstDown(requireUnconsumed = true)`, which a consumed press does
+  stop. `swallowTaps()` was written the wrong way round first and measured as still toggling
+  the chrome. Consuming the press is safe for the pager: `scrollable` takes its press on the
+  *initial* pass with `requireUnconsumed = false`, before any of this runs. (§4)
+- **The viewer's bottom band is derived, not measured.** `MediaViewerScreen` subtracts
+  `FilmStripHeight + ViewerActionRowHeight` from the page and hands the bar the same number.
+  Change the filmstrip's thumbnail size or the action row's height without changing those
+  constants and the picture silently sits over, or short of, the bar. (§4)
 - **Grid state must stay hoisted in `GalleryApp`.** The viewer replaces the grid in the
   composition rather than stacking on it, so anything remembered inside `GalleryGridScreen` is
   destroyed when a photo opens. (§4)
@@ -711,6 +743,27 @@ Changing either of these back will break things silently, with no error:
 ---
 
 ## 7. Changelog
+
+### 2026-09-21 — the viewer holds still
+
+Owner: *"The viewer adjusts itself when I tap the screen to show the ghost UI and filmstrip.
+This is not behavior that I want... When I miss the play button it'll hide it, resize and I
+have to tap again and the view resizes again."*
+
+Two faults compounding. The bottom band was reserved **only while the chrome was visible**, so
+every toggle re-laid out the page — and a tap that missed a ghost button fell through to the
+page, which toggles the chrome, so a single miss cost two resizes. Now the band is reserved
+unconditionally and taps that land in the cluster but on no control are consumed. The top bar
+swallows its own taps for the same reason.
+
+Also: the top bar is shorter (date 16→14 sp, time 12→11 sp, 12 dp of bottom padding down to 4),
+the ghost cluster slides in from the bottom edge instead of only fading, the play button is
+48 dp painted / 58 dp tappable, and every video carries a `name · fps · frames` line above the
+controls. The frame count is duration × rate — exact for constant-rate footage, an estimate
+otherwise, and absent entirely when the decoder reports no rate rather than invented from a
+default.
+
+Evidence is in §1; the two things that will bite a later change are in §6a.
 
 ### 2026-09-21 — a GIF may hold at most 250 frames
 

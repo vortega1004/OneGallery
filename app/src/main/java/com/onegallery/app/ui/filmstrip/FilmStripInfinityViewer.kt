@@ -38,6 +38,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.coerceAtLeast
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
@@ -76,12 +77,10 @@ fun FilmStripInfinityViewer(
     val coroutineScope = rememberCoroutineScope()
     val density = LocalDensity.current
 
-    // Kept deliberately small: the strip is now given its own space at the bottom of the
-    // viewer instead of floating over the picture, so every dp here is a dp the photo loses.
-    val itemWidth = 38.dp
-    val itemHeight = 48.dp
-    val itemSpacing = 4.dp
-    val expandedScale = 1.25f
+    val itemWidth = FilmStripItemWidth
+    val itemHeight = FilmStripItemHeight
+    val itemSpacing = FilmStripItemSpacing
+    val expandedScale = FilmStripExpandedScale
     val itemStridePx = with(density) { (itemWidth + itemSpacing).toPx() }
     val magnifyRangePx = with(density) { 120.dp.toPx() }
 
@@ -142,7 +141,7 @@ fun FilmStripInfinityViewer(
     BoxWithConstraints(
         modifier = modifier
             .fillMaxWidth()
-            .height(itemHeight * expandedScale + 10.dp)
+            .height(FilmStripHeight)
             .background(Color(0xCC000000)),
         contentAlignment = Alignment.Center
     ) {
@@ -233,3 +232,19 @@ fun FilmStripInfinityViewer(
         )
     }
 }
+
+/*
+ * Kept deliberately small: the strip has a reserved band at the bottom of the viewer rather
+ * than floating over the picture, so every dp here is a dp the photo loses.
+ *
+ * File-level so the viewer can reserve exactly [FilmStripHeight] without measuring the strip.
+ * That reservation has to hold whether the chrome is on screen or not, and a measured one reads
+ * zero until the bar's first layout pass — a jump exactly where the viewer opens.
+ */
+private val FilmStripItemWidth = 38.dp
+private val FilmStripItemHeight = 48.dp
+private val FilmStripItemSpacing = 4.dp
+private const val FilmStripExpandedScale = 1.25f
+
+/** Height of the strip, including the room the centre thumbnail needs once magnified. */
+val FilmStripHeight: Dp = FilmStripItemHeight * FilmStripExpandedScale + 10.dp

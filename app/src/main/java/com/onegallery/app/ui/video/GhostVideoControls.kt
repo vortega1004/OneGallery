@@ -43,6 +43,9 @@ internal val GhostOutline = Color(0x59FFFFFF)
 internal val GhostOutlineStrong = Color(0xB3FFFFFF)
 internal val GhostContent = Color(0xEBFFFFFF)
 
+/** For text that should be readable but never compete with the controls. */
+internal val GhostContentDim = Color(0xB3FFFFFF)
+
 @Composable
 internal fun GhostIconButton(
     icon: ImageVector,

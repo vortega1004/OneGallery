@@ -24,8 +24,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -49,7 +53,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -63,8 +66,6 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -74,7 +75,9 @@ import com.onegallery.app.domain.MediaItem
 import com.onegallery.app.domain.MediaType
 import com.onegallery.app.ui.common.rememberFullSizeRequest
 import com.onegallery.app.ui.common.rememberThumbnailRequest
+import com.onegallery.app.ui.common.swallowTaps
 import com.onegallery.app.ui.editor.PhotoEditorScreen
+import com.onegallery.app.ui.filmstrip.FilmStripHeight
 import com.onegallery.app.ui.filmstrip.FilmStripInfinityViewer
 import com.onegallery.app.ui.video.VideoPlayerView
 import kotlinx.coroutines.delay
@@ -129,16 +132,15 @@ fun MediaViewerScreen(
     // if the user paged or scrubbed far from where they entered.
     LaunchedEffect(currentItem.id) { onVisibleItemChange(currentItem.id) }
 
-    // The bottom bar gets its own space rather than covering the picture: the page is inset by
-    // however tall the bar measured, so a photo whose aspect ratio matches the screen is no
-    // longer hidden behind the filmstrip. The last measurement is kept while the bar is hidden
-    // (AnimatedVisibility stops composing it, so onSizeChanged never reports zero), and the inset
-    // is simply dropped to zero then, giving a real fullscreen view on tap.
-    val density = LocalDensity.current
-    var bottomBarHeightPx by remember { mutableIntStateOf(0) }
-    val reservedBottom = with(density) {
-        if (isOverlayVisible) bottomBarHeightPx.toDp() else 0.dp
-    }
+    // The picture area never changes size. The bottom band belongs to the chrome whether the
+    // chrome is on screen or not, so showing and hiding it slides a bar over a layout that has
+    // already settled instead of re-measuring the page under the user's thumb. Tapping to bring
+    // the controls back used to resize the picture twice — once on the miss, once on the retry.
+    //
+    // Derived rather than measured, for the same reason: a measured band is zero until the bar's
+    // first layout pass, which would put a jump right where the viewer opens.
+    val reservedBottom = FilmStripHeight + ViewerActionRowHeight +
+        WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
 
     val dateFormat = remember { SimpleDateFormat("MMM d, yyyy", Locale.getDefault()) }
     val timeFormat = remember { SimpleDateFormat("h:mm a", Locale.getDefault()) }
@@ -196,8 +198,11 @@ fun MediaViewerScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(Color(0x99000000))
+                    // Overlays the picture, so it has to stop taps itself: this bar covers the
+                    // top of the photo and every dp of it used to toggle the chrome off again.
+                    .swallowTaps()
                     .statusBarsPadding()
-                    .padding(top = 4.dp, bottom = 12.dp, start = 8.dp, end = 8.dp)
+                    .padding(top = 2.dp, bottom = 4.dp, start = 8.dp, end = 8.dp)
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -220,13 +225,13 @@ fun MediaViewerScreen(
                             Text(
                                 text = formattedDate,
                                 color = Color.White,
-                                fontSize = 16.sp,
+                                fontSize = 14.sp,
                                 fontWeight = FontWeight.SemiBold
                             )
                             Text(
                                 text = formattedTime,
                                 color = Color.LightGray,
-                                fontSize = 12.sp
+                                fontSize = 11.sp
                             )
                         }
                     }
@@ -261,8 +266,10 @@ fun MediaViewerScreen(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .onSizeChanged { bottomBarHeightPx = it.height }
+                    // Exactly the band the pager gave up, so the two cannot drift apart
+                    .height(reservedBottom)
                     .background(Color(0xCC000000))
+                    .swallowTaps()
                     .navigationBarsPadding()
             ) {
                 // Samsung Filmstrip Infinity Scrubber
@@ -283,7 +290,8 @@ fun MediaViewerScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 24.dp, vertical = 2.dp),
+                        .height(ViewerActionRowHeight)
+                        .padding(horizontal = 24.dp),
                     horizontalArrangement = Arrangement.SpaceAround,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -493,6 +501,14 @@ private fun ZoomableImageView(
         )
     }
 }
+
+/**
+ * The action row under the filmstrip: one 48 dp icon target plus a little breathing room.
+ *
+ * Fixed rather than wrapped, because [MediaViewerScreen] subtracts this from the page before
+ * either is laid out. The row is given this height explicitly so the two stay in agreement.
+ */
+private val ViewerActionRowHeight = 52.dp
 
 private const val FULL_RES_DELAY_MS = 120L
 private const val DOUBLE_TAP_ZOOM_MS = 220
