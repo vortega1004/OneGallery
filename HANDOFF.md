@@ -1,6 +1,11 @@
 # OneGallery — Engineering Handoff
 
-**Last verified:** 2026-09-21 — frame stepping no longer seeks the player: frames are
+**Last verified:** 2026-09-28 — files can be moved between albums in the app (grid
+multi-select and the viewer's ⋮ menu); rows left behind by another app's moves are repaired;
+and play after a frame walk no longer flashes the frame the walk began on. All three
+exercised on the `Pixel_9_Pro_XL` AVD — the flash as a before/after A/B, the moves verified on
+disk and in MediaStore. None of it has run on the owner's Pixel yet.
+Before that (2026-09-21): frame stepping stopped seeking the player: frames are
 decoded in runs and walked out of memory, with the frame number on screen. Measured on the
 AVD against a 4K clip: **2.5–3.7 s per step before, under the 0.85 s measurement floor after**.
 Before that, the viewer stopped resizing when its chrome toggles, taps
@@ -12,7 +17,7 @@ that, the GIF frame count was capped at 250 (unit-tested only), and the GIF crea
 builds and 29 unit tests pass; GIF creation was exercised on the `Pixel_9_Pro_XL` AVD and
 then by hand on the device. The feature has had **no external review** — the `REVIEWER.md`
 round covered the video change only.
-**Status:** Debug and release builds pass, 36 unit tests pass per variant. Earlier work
+**Status:** Debug and release builds pass, 43 unit tests pass per variant. Earlier work
 was smoke-tested on the emulator and on a physical
 Pixel 10 Pro XL against a real 3,132-item library. Video frame capture works on real
 hardware. Two performance problems appear only at that scale (§6.15, §6.16). See §1 for
@@ -121,7 +126,7 @@ crashes** on either. Anything the emulator's tiny library cannot exercise is cal
 | Sorting (albums + media) | **VERIFIED on emulator** — all options present, orders correct, grid/viewer indices stay aligned after a re-sort, selection survives the viewer. "Date taken" vs "Date added" divergence **NOT verifiable on the emulator**: every test file has a null EXIF capture time, so `dateTaken` falls back to `dateAdded` and the two orders coincide by definition |
 | Thumbnail decoding | **VERIFIED firing** on emulator (fetch path instrumented and counted); **speedup only measurable on real photos** — emulator test images are 480×360, so there is nothing to save. Owner reports stutter "mostly gone" on the Pixel |
 | Launcher icon | **VERIFIED** — adaptive icon renders correctly under the launcher mask |
-| Automated tests | **36 JVM unit tests pass per variant** (`gradlew.bat test`): the previous 22 plus `GifDraftTest` (6) and `GifEncoderTest` (3). GIF tests cover ordered selection, loop sequences, frame editing, dimensions/timing, and independent ImageIO decoding including LZW dictionary resets and colour quantization. UI and MediaStore coverage remains manual |
+| Automated tests | **43 JVM unit tests pass per variant** (`gradlew.bat test`): the previous 22 plus `GifDraftTest` (6) and `GifEncoderTest` (3). GIF tests cover ordered selection, loop sequences, frame editing, dimensions/timing, and independent ImageIO decoding including LZW dictionary resets and colour quantization. UI and MediaStore coverage remains manual |
 | GIF image selection | **VERIFIED on emulator** — two endpoints + Select between selected four images in displayed order; long-press drag selected nine consecutive images; dragging toward the bottom edge scrolled and extended the selection to 18. Selection works in Pictures and is wired identically inside albums; the album-specific flow still needs a manual pass |
 | GIF editor and export | **VERIFIED on emulator** — duplicate inserted immediately after the active frame, removal restored the four-frame sequence; speed, rotation, square crop and boomerang saved successfully to `Pictures/OneGallery Gifs/`. Independent Pillow decoding: 405×405, six frames, 110 ms each, infinite loop, hashes in A B C D C B order. A nine-image 1080px-canvas export also completed. Reverse preview and pause exercised |
 | Frame stepping is off the seek path | **MEASURED on emulator, 4K clip with a 2 s GOP.** One tap, time until the picture changes, five trials each: the old seek path took 2.48 / 2.53 / 2.56 / 3.11 / 3.72 s; the new one had already changed by the first poll every time, and a poll costs ~0.85 s, so its latency is *below what this method can see* rather than measured. Same emulator, same clip, same taps |
@@ -132,7 +137,10 @@ crashes** on either. Anything the emulator's tiny library cannot exercise is cal
 | A tap that misses a video control does nothing | **VERIFIED on emulator** — six dead spots probed (the detail line, the gap between the two control rows, the far left of the playback row, between the frame-step buttons, between shutter and mute, above the jog strip) and the chrome stayed up for all six. Before the change the row gap hid it. Tapping the picture still toggles, and the top bar no longer toggles either |
 | Video controls still work under the tap swallow | **VERIFIED on emulator** — three consecutive bursts of ten rapid next-frame taps moved exactly +10, +10, +10 rendered frames; ten spaced taps +10; jog 336 px right then left went 283 → 275 → 283 (right still steps backward). A sideways swipe started inside the cluster still pages |
 | Clip detail line | **VERIFIED on emulator** — reads `framenum.mp4  30 fps · 600 frames`; `ffprobe` on the same file reports 30/1 and 600 frames. Long names are untested against a real camera roll: the name is the part that truncates, by construction |
-| GIF frame ceiling (250) | **UNIT-TESTED ONLY — no device pass.** `capSelection` and the `duplicateActive` guard are covered by `GifDraftTest`; the UI half (the chokepoint in `GalleryGridScreen`, the "(max)" header, the disabled duplicate button) has not been run anywhere. The emulator library is too small to reach 250 selectable images, so the first real exercise will be on the Pixel |
+| Moving files between albums | **VERIFIED on emulator, on disk and in MediaStore.** Two photos and a video multi-selected → Move (3) → New album → system dialog "Allow OneGallery to modify 3 items?" → Allow: all three rows now `Pictures/<album>/`, the files physically in that folder and gone from the old ones, toast "Moved 3 items to …", selection cleared. From the viewer's ⋮ → Move to album, into a folder that already held a file of the same name: landed as `refview_sample_15 (1).jpg` beside it, toast says one was renamed, nothing overwritten. The picker greyed Movies ("Photos can't go in Movies/"), the storage root ("Can't move items here") and the source ("Already here"). **Not run:** media-management granted (no-dialog path), an SD card, a batch in the hundreds |
+| Play after a frame walk | **A/B on emulator, 4K clip.** Same script on both builds: walk 93 → 97, let the player park on 97, step back to 95, press play. Before: 95, then **93, 93** — the frame the walk started from — then playback. After: 95, then playback |
+| Rows whose files are gone | **VERIFIED on emulator.** A MediaStore row inserted for a path with no file appeared as its own album (5 albums / 28 items). On the next launch the app nominated it, the scanner deleted the row (gone from MediaStore, not just hidden), and Albums went back to 4 / 27. The owner's actual trigger — a bulk move in Google Photos — could not be reproduced here |
+| GIF frame ceiling (250) | **Moved from the selection to the GIF button** now that selection also feeds moves. The button reads `GIF (n)` and disables past 250 (`GIF: 250 max`); the creator and the renderer still enforce it. Checked that a mixed selection of two stills and a video shows Move (3) and GIF (2), and the creator opens with exactly the two stills. The 250 boundary itself has not been reached on any device |
 | GIF creator on the owner's Pixel | **USED BY THE OWNER**, 2026-09-21, on the physical Pixel 10 Pro XL against the real 3,132-item library: it works, and he wants unspecified cleanup. This row records that the feature ran on real hardware, nothing more — no timings, and no named defect list yet |
 | GIF rotation and cancellation | **VERIFIED on emulator** — nine-frame draft survived portrait→landscape→portrait; tools scroll beside the preview in landscape. Cancelling an 18-image export with Back returned to the draft; MediaStore and the output directory contained only the two earlier completed GIFs, with no partial file. Large-library / physical-Pixel performance **not measured** |
 | Video clock readout | **VERIFIED on emulator** — one decimal at all times (`0:11.0` / `0:20.0`), playing and paused. The old seconds-vs-milliseconds swap no longer resizes the label. Note the readout is a *display* format only: at 30 fps three consecutive frames can share a tenth, so it cannot be used to count frames (it also shows the requested seek target, not the rendered frame) |
@@ -241,12 +249,14 @@ app/src/main/
     ├── GalleryViewModel.kt       # StateFlow of the media list (single MediaStore subscription)
     ├── data/
     │   ├── MediaStoreRepository.kt   # ContentResolver queries, ContentObserver, snapshot saver
+    │   ├── MediaMover.kt             # Moves media between folders (RELATIVE_PATH) + the rules
     │   ├── MediaThumbnailFetcher.kt  # Coil fetcher: MediaStore thumbnails for small requests
     │   └── SortPreferences.kt        # Per-album sort orders, persisted with DataStore
     ├── domain/MediaItem.kt       # Models, toAlbums(), AlbumSort/MediaSort + their sorts
     └── ui/
         ├── common/MediaImageRequests.kt          # Coil requests: thumbnail stand-in, full-size + placeholder
         ├── common/PointerModifiers.kt            # swallowTaps(): a miss inside a control cluster does nothing
+        ├── move/MoveToAlbumSheet.kt              # Album picker for moves; greys out folders that can't take the batch
         ├── grid/GalleryGridScreen.kt             # Grid, Albums folders, sort menus, bottom nav
         ├── viewer/MediaViewerScreen.kt           # HorizontalPager + zoomable image + overlays + editor overlay
         ├── viewer/MediaDetailsSheet.kt           # ModalBottomSheet: MediaStore fields + async EXIF
@@ -354,6 +364,23 @@ given that same height explicitly, so the two cannot drift apart.
 page toggles its chrome on tap, so the gaps between ghost buttons used to dismiss the controls
 the user was reaching for. It is the *press* that must be consumed — see §6a, this is not
 interchangeable with consuming the release.
+
+**Moving files** is a MediaStore `RELATIVE_PATH` update (`data/MediaMover.kt`), not
+copy-and-delete: MediaProvider renames the file on disk, the row keeps its id, and every app
+sees the new folder at once. Scoped storage lets an app modify only what it created, so each
+batch first goes through `MediaStore.createWriteRequest` — one system dialog per batch —
+launched from `GalleryApp`, which hosts the whole flow so the grid's multi-select and the
+viewer's ⋮ menu share it. The manifest declares `MANAGE_MEDIA`; if the user grants *Media
+management* in Settings (the picker links there), the same request is approved with no dialog.
+The picker checks MediaStore's folder rules up front (photos: DCIM, Pictures; videos: also
+Movies) so it can grey out a folder instead of accepting a move that will throw. Name clashes
+become `name (1).ext`, case-insensitively, because shared storage is casefolded. Selection is
+therefore no longer GIF-only: every item is selectable and the GIF button takes the stills.
+
+**The library repairs rows whose files are gone.** After each load, any row whose path does not
+exist is handed to `MediaScannerConnection.scanFile` once per process; for a genuinely empty
+path the scanner deletes the row and the observer re-queries. The app never hides an item on
+its own `File.exists()` — see §6a.
 
 **Frame stepping does not use the player.** `VideoFrameCache` decodes runs of consecutive
 frames through `MediaMetadataRetriever.getFramesAtIndex` and keeps them, scaled to the display
@@ -593,10 +620,10 @@ whatever he actually noticed is not written down anywhere yet.
   selected speed. Physical-Pixel latency and large-selection memory behaviour are unmeasured.
 - Canvas uses the first image's aspect ratio and fits other images on black. No fill/cover
   mode, background picker, transparency, per-frame durations, or dithering control yet.
-- Selection accepts still images (including a motion photo's still component), not video or
-  animated-GIF expansion. Between 2 and `MAX_GIF_FRAMES` (250) frame instances are retained.
-  The ceiling is silent: a range fill or sweep past it simply stops growing and the header
-  reads "(max)". There is no dialog, and no way to raise it from the UI.
+- Selection is general (it also feeds Move); the GIF takes only the stills in it, including a
+  motion photo's still component — never video, and animated GIFs are not expanded. Between 2
+  and `MAX_GIF_FRAMES` (250) frames: past 250 the button disables and reads `GIF: 250 max`.
+  There is no way to raise it from the UI.
 - Crop presets place a rectangle; free corner dragging is not aspect-locked, matching the
   existing photo editor. Physical-thumb crop/drag ergonomics, album selection, sharing to an
   external app, and storage/access-failure recovery still need manual coverage.
@@ -760,6 +787,22 @@ Changing either of these back will break things silently, with no error:
   `FilmStripHeight + ViewerActionRowHeight` from the page and hands the bar the same number.
   Change the filmstrip's thumbnail size or the action row's height without changing those
   constants and the picture silently sits over, or short of, the bar. (§4)
+- **"The player has drawn a frame at or past the target" does not mean the seek landed.**
+  The still is handed back when `VideoFrameMetadataListener` reports such a frame — but a walk
+  that steps *back* from where the player was parked ends behind the frame the player last drew,
+  so that stale frame already qualifies, and it flashed up before playback. Frames only count
+  once a `PlayerMessage`, sent after the seek and delivered on the *playback* looper, has run:
+  ExoPlayer processes messages in order, so by then the seek is handled and the decoder
+  flushed. Delivered on the main looper instead, it could arrive after the target frame and
+  leave the handover waiting for its timeout. (§4)
+- **Never hide a media row on this app's own `File.exists()`.** A false negative — an access
+  quirk, a volume mid-mount — would make a real photo vanish from the gallery for good. Stale
+  rows are *nominated* to the MediaStore scanner, which has full access and deletes the row
+  only if the file really is gone. (§4)
+- **The app's palette is not wired into `MaterialTheme`.** Material 3 components left on their
+  defaults pick colours meant for a different background: the new-album text field drew the
+  typed name dark grey on the dark dialog. Pass colours explicitly (see `MoveToAlbumSheet`)
+  until the theme is fixed properly.
 - **`getFramesAtIndex` materialises the whole run at once.** It returns a `List<Bitmap>`, so
   every frame in the run exists at full resolution simultaneously — 33 MB each at 4K, a quarter
   of a gigabyte for a run of eight, on exactly the footage a phone shoots. `VideoFrameCache`
@@ -782,6 +825,35 @@ Changing either of these back will break things silently, with no error:
 ---
 
 ## 7. Changelog
+
+### 2026-09-28 — move files in the app; phantom files; no flash after a walk
+
+Owner: *"After I use the frame forward or backward button and hit play the video briefly shows
+where I paused from then plays the video from the frame I was on"*; *"If I use photos to move
+a file into a different folder one of the files shows to still be in the origin folder... Both
+my file explorer and photos show correctly"*; *"I also need to be able to move files around in
+the app."*
+
+**The flash** was a timer. The stepped-to still was dropped 150 ms after the seek that precedes
+playback — enough on the emulator, not on a phone with 4K — uncovering whatever the player's
+surface still held. It is now dropped when ExoPlayer's frame-metadata listener reports a frame
+at or past the target being drawn, counted only after the seek has been processed (§6a); and
+the player is parked under the still after 400 ms without a tap, so play usually needs no seek
+at all. A/B in §1.
+
+**The phantom** is almost certainly a stale MediaStore row: his file manager reads the disk,
+Photos keeps its own index, this app trusts MediaStore. The observer could not have lost the
+final change (conflate then requery). Rows whose files are missing are now handed to the
+scanner, which deletes them. Reproduced with a planted row, not with Photos itself — so if a
+phantom *survives a full restart* of the app, the theory is wrong and it needs another look.
+
+**Moving** is new: multi-select in any grid, or ⋮ in the viewer; pick an album or create one
+under Pictures; one system confirmation per batch, or none once *Media management* is granted.
+Selection had to stop being GIF-only for this, so the 250-frame ceiling moved from the selection
+to the GIF button — otherwise no more than 250 files could be moved at once.
+
+Commits `68ccb8c` (flash), `902ca5a` (phantoms), and the move feature. 43 unit tests (8 new for
+the move rules; the selection-cap test went with the selection cap).
 
 ### 2026-09-21 — frame stepping stops seeking
 
@@ -1201,9 +1273,14 @@ Roughly dependency-ordered. Good first tasks are marked ★.
    on every change. Now the largest remaining structural problem — thumbnail decoding is done.
 1a. **GIF creator cleanup** — deliberately *below* the two items above, which is where the
    owner put it. He has used the feature and wants polish, but has not said what; the first
-   move is to get that list from him rather than to guess from §6.17. The frame ceiling that
-   used to head this list is done (250, 2026-09-21) but has only been unit-tested — confirm
-   on the Pixel that a big sweep stops cleanly rather than looking stuck.
+   move is to get that list from him rather than to guess from §6.17.
+1b. **Decode the frames a fast walk skips.** Tapping next-frame faster than frames decode
+   cancels the decodes for the frames passed over, so stepping *back* into them is a fresh
+   decode — seen on the emulator as `frame 101 / 240 …` sitting over frame 103 for a couple of
+   seconds. A forward burst could decode the whole span in runs instead of only its endpoint.
+   Measure on the Pixel first; hardware decode may make this invisible.
+1c. **Delete and Share on the multi-select bar.** Selection is general now, so both are small:
+   `createTrashRequest` and an `ACTION_SEND_MULTIPLE` intent, beside Move.
 2. **Chase the residual filmstrip stutter** (§6.15) *only if it still bothers you*. Decoding is
    no longer the bottleneck; the next suspect is per-frame recomposition of visible thumbnails
    during a pager drag. Measure on a real library before changing anything.

@@ -3,7 +3,10 @@ package com.onegallery.app
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.onegallery.app.data.MediaMover
 import com.onegallery.app.data.MediaStoreRepository
+import com.onegallery.app.data.MoveDestination
+import com.onegallery.app.data.MoveResult
 import com.onegallery.app.data.SortPreferences
 import com.onegallery.app.data.SortPreferencesRepository
 import com.onegallery.app.domain.AlbumSort
@@ -29,6 +32,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     val repository = MediaStoreRepository(application)
 
+    /** Launch [MediaMover.writeRequest] first; call [move] only once the user has allowed it. */
+    val mover = MediaMover(application)
+
     private val refreshRequests = MutableStateFlow(0)
 
     val mediaItems: StateFlow<List<MediaItem>> = refreshRequests
@@ -52,6 +58,16 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     /** [albumId] is null when sorting the flat Pictures tab. */
     fun setMediaSort(albumId: String?, sort: MediaSort) {
         viewModelScope.launch { sortPreferencesRepository.setMediaSort(albumId, sort) }
+    }
+
+    /**
+     * Moves [items] into [destination]; [onDone] runs on the main thread with the tally.
+     *
+     * Nothing here updates [mediaItems] directly: each move is a MediaStore update, the observer
+     * sees it, and the library re-queries — the same path a move made in another app takes.
+     */
+    fun move(items: List<MediaItem>, destination: MoveDestination, onDone: (MoveResult) -> Unit) {
+        viewModelScope.launch { onDone(mover.move(items, destination)) }
     }
 
     /** Re-subscribes and re-queries, e.g. after the granted media permissions changed. */

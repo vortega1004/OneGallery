@@ -1,7 +1,6 @@
 package com.onegallery.app.ui.gif
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.fail
 import org.junit.Test
 import com.onegallery.app.ui.editor.NormalizedRect
 import com.onegallery.app.ui.editor.PhotoEditState
@@ -34,21 +33,6 @@ class GifDraftTest {
         assertEquals(listOf(1L, 0L, 2L), draft.moveActive(-1).frames.map { it.key })
         val pair = GifDraft(frames.take(2))
         assertEquals(pair, pair.removeActive())
-    }
-
-    @Test fun `the frame ceiling keeps the earliest frames in displayed order`() {
-        // Shuffled ids: the cap must follow the grid's order, not numeric or insertion order.
-        val ids = (0 until MAX_GIF_FRAMES + 50).map { (it * 7919L) % 10_000 }.distinct()
-        val capped = capSelection(ids.toSet()) { ids }
-
-        assertEquals(MAX_GIF_FRAMES, capped.size)
-        assertEquals(ids.take(MAX_GIF_FRAMES).toSet(), capped)
-        // Anything at or under the ceiling is handed back untouched.
-        // ...and without so much as asking for the ordering, which is the expensive part.
-        val small = ids.take(3).toSet()
-        assertEquals(small, capSelection(small) { fail("ordering must not be built under the cap"); ids })
-        val exactly = ids.take(MAX_GIF_FRAMES).toSet()
-        assertEquals(exactly, capSelection(exactly) { fail("the ceiling itself is not over it"); ids })
     }
 
     @Test fun `duplicate stops at the ceiling instead of growing past it`() {

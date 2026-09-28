@@ -34,20 +34,6 @@ internal fun selectionBetween(orderedIds: List<Long>, selected: Set<Long>): Set<
     return orderedIds.subList(positions.first(), positions.last() + 1).toSet()
 }
 
-/**
- * Trims [selection] to [MAX_GIF_FRAMES], keeping the earliest in displayed order.
- *
- * Dropping from the end is the predictable half to lose: a sweep or a range fill grows from
- * its start, so the frames that survive are the ones the gesture began with.
- *
- * [orderedIds] is a lambda because this sits in a drag loop. The ordering costs a list of
- * every displayed id — boxed — and under the ceiling it is never read, so the caller must not
- * be made to build it on every pointer move to reach an early return.
- */
-internal fun capSelection(selection: Set<Long>, orderedIds: () -> List<Long>): Set<Long> =
-    if (selection.size <= MAX_GIF_FRAMES) selection
-    else orderedIds().asSequence().filter { it in selection }.take(MAX_GIF_FRAMES).toSet()
-
 data class GifFrame(val key: Long, val uri: String, val name: String)
 
 data class GifDraft(

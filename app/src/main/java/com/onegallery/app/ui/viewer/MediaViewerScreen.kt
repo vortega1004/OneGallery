@@ -44,6 +44,8 @@ import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Share
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -99,7 +101,8 @@ fun MediaViewerScreen(
     initialIndex: Int,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
-    onVisibleItemChange: (Long) -> Unit = {}
+    onVisibleItemChange: (Long) -> Unit = {},
+    onMoveRequest: (MediaItem) -> Unit = {}
 ) {
     if (mediaItems.isEmpty()) return
 
@@ -244,12 +247,24 @@ fun MediaViewerScreen(
                                 tint = Color.White
                             )
                         }
-                        IconButton(onClick = { /* Set wallpaper / Rename */ }) {
-                            Icon(
-                                imageVector = Icons.Rounded.MoreVert,
-                                contentDescription = "More",
-                                tint = Color.White
-                            )
+                        Box {
+                            var menuOpen by remember { mutableStateOf(false) }
+                            IconButton(onClick = { menuOpen = true }) {
+                                Icon(
+                                    imageVector = Icons.Rounded.MoreVert,
+                                    contentDescription = "More",
+                                    tint = Color.White
+                                )
+                            }
+                            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("Move to album") },
+                                    onClick = {
+                                        menuOpen = false
+                                        onMoveRequest(currentItem)
+                                    }
+                                )
+                            }
                         }
                     }
                 }

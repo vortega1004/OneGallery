@@ -25,7 +25,15 @@ data class MediaItem(
     val orientation: Int = 0,
     val bucketId: String,
     val bucketName: String,
-    val isFavorite: Boolean = false
+    val isFavorite: Boolean = false,
+    /**
+     * MediaStore's `RELATIVE_PATH` — the folder within its volume, with a trailing slash
+     * ("DCIM/Camera/"). Empty for an item handed to us by another app that is not in MediaStore.
+     * This, not [path], is what a move writes: MediaStore renames the file on disk to match.
+     */
+    val relativePath: String = "",
+    /** MediaStore volume ("external_primary", or an SD card's id). Moves stay on one volume. */
+    val volumeName: String = ""
 ) {
     val aspectRatio: Float
         get() = if (height > 0) width.toFloat() / height.toFloat() else 1f
@@ -48,7 +56,9 @@ data class Album(
     val name: String,
     val coverUri: Uri,
     val count: Int,
+    /** MediaStore `RELATIVE_PATH` of the folder, e.g. "DCIM/Camera/" — where a move writes to. */
     val relativePath: String,
+    val volumeName: String = "",
     /** Date of the most recent item, used for "recently updated" ordering. */
     val newestDate: Long = 0L,
     /** Date of the oldest item, so "oldest first" means the album you started longest ago. */
@@ -167,7 +177,8 @@ fun List<MediaItem>.toAlbums(): List<Album> =
                 name = newest.bucketName,
                 coverUri = newest.uri,
                 count = itemsInBucket.size,
-                relativePath = newest.path.substringBeforeLast('/', ""),
+                relativePath = newest.relativePath,
+                volumeName = newest.volumeName,
                 newestDate = newest.dateTaken,
                 oldestDate = itemsInBucket.last().dateTaken,
                 totalBytes = itemsInBucket.sumOf { it.size },

@@ -127,7 +127,9 @@ class MediaStoreRepository(private val context: Context) {
             MediaStore.Files.FileColumns.DURATION,
             MediaStore.Files.FileColumns.ORIENTATION,
             MediaStore.Files.FileColumns.BUCKET_ID,
-            MediaStore.Files.FileColumns.BUCKET_DISPLAY_NAME
+            MediaStore.Files.FileColumns.BUCKET_DISPLAY_NAME,
+            MediaStore.Files.FileColumns.RELATIVE_PATH,
+            MediaStore.Files.FileColumns.VOLUME_NAME
         )
 
         val selection = buildString {
@@ -166,6 +168,8 @@ class MediaStoreRepository(private val context: Context) {
             val orientationCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.ORIENTATION)
             val bucketIdCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.BUCKET_ID)
             val bucketNameCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.BUCKET_DISPLAY_NAME)
+            val relativePathCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.RELATIVE_PATH)
+            val volumeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.VOLUME_NAME)
 
             while (cursor.moveToNext()) {
                 val id = cursor.getLong(idCol)
@@ -214,7 +218,9 @@ class MediaStoreRepository(private val context: Context) {
                         durationMs = duration,
                         orientation = orientation,
                         bucketId = bucketId,
-                        bucketName = bucketName
+                        bucketName = bucketName,
+                        relativePath = cursor.getString(relativePathCol) ?: "",
+                        volumeName = cursor.getString(volumeCol) ?: ""
                     )
                 )
             }

@@ -87,7 +87,6 @@ import com.onegallery.app.ui.theme.DarkTextPrimary
 import com.onegallery.app.ui.theme.DarkTextSecondary
 import com.onegallery.app.ui.theme.OneUIBlue
 import com.onegallery.app.ui.gif.MAX_GIF_FRAMES
-import com.onegallery.app.ui.gif.capSelection
 import com.onegallery.app.ui.gif.selectionBetween
 
 const val TAB_PICTURES = 0
@@ -129,6 +128,7 @@ fun GalleryGridScreen(
     onSelectionModeChange: (Boolean) -> Unit,
     onSelectionChange: (Set<Long>) -> Unit,
     onCreateGif: (List<MediaItem>) -> Unit,
+    onMove: (List<MediaItem>) -> Unit,
     modifier: Modifier = Modifier
 ) {
     // Derived from the list already in memory — no second MediaStore query.
@@ -139,15 +139,16 @@ fun GalleryGridScreen(
     val sortedAllItems = remember(mediaItems, mediaSort) {
         mediaItems.forAlbum(null).sortedBy(mediaSort)
     }
+    // Everything is selectable: selection serves moving as well as GIFs. The GIF creator takes
+    // the stills out of it and ignores the rest.
     val selectableItems = remember(mediaItems, openedAlbumId, mediaSort) {
-        mediaItems.forAlbum(openedAlbumId).sortedBy(mediaSort).filter { it.canBeGifFrame }
+        mediaItems.forAlbum(openedAlbumId).sortedBy(mediaSort)
     }
-    val selectedImages = selectableItems.filter { it.id in selectedImageIds }
-    // Every path that can grow the selection — tap, sweep, range fill — goes through here, so
-    // the frame ceiling is enforced in one place instead of three.
-    val changeSelection: (Set<Long>) -> Unit = { proposed ->
-        onSelectionChange(capSelection(proposed) { selectableItems.map { item -> item.id } })
-    }
+    val selectedItems = selectableItems.filter { it.id in selectedImageIds }
+    val gifFrames = selectedItems.filter { it.canBeGifFrame }
+    // No ceiling on the selection itself — moving 800 photos is a reasonable thing to do. The
+    // GIF limit is enforced where a GIF is made: its button, the creator and the renderer.
+    val changeSelection: (Set<Long>) -> Unit = onSelectionChange
     val clearSelection = { onSelectionChange(emptySet()); onSelectionModeChange(false) }
     LaunchedEffect(selectableItems) {
         val available = selectableItems.mapTo(hashSetOf()) { it.id }
@@ -165,11 +166,20 @@ fun GalleryGridScreen(
             if (selectionMode) {
                 NavigationBar(containerColor = DarkSurface) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                        TextButton(enabled = selectedImages.size == 2, onClick = {
+                        TextButton(enabled = selectedItems.size == 2, onClick = {
                             changeSelection(selectionBetween(selectableItems.map { it.id }, selectedImageIds))
                         }) { Text("Select between") }
-                        TextButton(enabled = selectedImages.size >= 2, onClick = { onCreateGif(selectedImages) }) {
-                            Text("Create GIF (${selectedImages.size})")
+                        TextButton(enabled = selectedItems.isNotEmpty(), onClick = { onMove(selectedItems) }) {
+                            Text(if (selectedItems.isEmpty()) "Move" else "Move (${selectedItems.size})")
+                        }
+                        TextButton(
+                            enabled = gifFrames.size in 2..MAX_GIF_FRAMES,
+                            onClick = { onCreateGif(gifFrames) }
+                        ) {
+                            Text(
+                                if (gifFrames.size > MAX_GIF_FRAMES) "GIF: $MAX_GIF_FRAMES max"
+                                else "GIF (${gifFrames.size})"
+                            )
                         }
                     }
                 }
@@ -245,13 +255,13 @@ fun GalleryGridScreen(
                         val albumItems = remember(mediaItems, album.id, mediaSort) {
                             mediaItems.forAlbum(album.id).sortedBy(mediaSort)
                         }
-                        if (selectionMode) SelectionHeader(selectedImages.size, clearSelection) else OneUIHeader(
+                        if (selectionMode) SelectionHeader(selectedItems.size, clearSelection) else OneUIHeader(
                             title = album.name,
                             subtitle = itemCountLabel(albumItems.size),
                             onBack = { onOpenAlbum(null) },
                             trailing = {
                                 IconButton(onClick = { onSelectionModeChange(true) }) {
-                                    Icon(Icons.Rounded.Checklist, "Select images", tint = DarkTextPrimary)
+                                    Icon(Icons.Rounded.Checklist, "Select items", tint = DarkTextPrimary)
                                 }
                                 SortMenu(
                                     current = mediaSort,
@@ -304,12 +314,12 @@ fun GalleryGridScreen(
                     }
 
                     else -> {
-                        if (selectionMode) SelectionHeader(selectedImages.size, clearSelection) else OneUIHeader(
+                        if (selectionMode) SelectionHeader(selectedItems.size, clearSelection) else OneUIHeader(
                             title = "Pictures",
                             subtitle = itemCountLabel(sortedAllItems.size),
                             trailing = {
                                 IconButton(onClick = { onSelectionModeChange(true) }) {
-                                    Icon(Icons.Rounded.Checklist, "Select images", tint = DarkTextPrimary)
+                                    Icon(Icons.Rounded.Checklist, "Select items", tint = DarkTextPrimary)
                                 }
                                 SortMenu(
                                     current = mediaSort,
@@ -534,7 +544,7 @@ private fun MediaGrid(
                 mediaItem = item,
                 onClick = {
                     if (selectionMode) {
-                        if (item.canBeGifFrame) onSelectionChange(
+                        onSelectionChange(
                             if (item.id in selectedIds) selectedIds - item.id else selectedIds + item.id
                         )
                     } else onItemClick(index)
@@ -551,9 +561,7 @@ private fun MediaGrid(
 
 @Composable
 private fun SelectionHeader(count: Int, onClose: () -> Unit) {
-    val hint = if (count >= MAX_GIF_FRAMES) "Most frames a GIF can hold — deselect to swap one out"
-    else "Hold & drag, or select two endpoints and tap Select between"
-    OneUIHeader(if (count >= MAX_GIF_FRAMES) "$count selected (max)" else "$count selected", hint, trailing = {
+    OneUIHeader("$count selected", "Hold & drag, or select two endpoints and tap Select between", trailing = {
         IconButton(onClick = onClose) { Icon(Icons.Rounded.Close, "Cancel selection", tint = Color.White) }
     })
 }
@@ -684,17 +692,13 @@ private fun MediaGridCell(
             modifier = Modifier.fillMaxSize()
         )
         if (selectionMode) {
-            if (!mediaItem.canBeGifFrame) {
-                Box(Modifier.fillMaxSize().background(Color(0xAA000000)))
-            } else {
-                Box(Modifier.fillMaxSize().border(if (selected) 3.dp else 1.dp,
-                    if (selected) OneUIBlue else Color(0x55FFFFFF)))
-                Icon(if (selected) Icons.Rounded.CheckCircle else Icons.Rounded.RadioButtonUnchecked,
-                    if (selected) "Selected image" else "Unselected image",
-                    tint = if (selected) OneUIBlue else Color.White,
-                    modifier = Modifier.align(Alignment.TopEnd).padding(6.dp)
-                        .background(Color(0x99000000), RoundedCornerShape(12.dp)).size(24.dp))
-            }
+            Box(Modifier.fillMaxSize().border(if (selected) 3.dp else 1.dp,
+                if (selected) OneUIBlue else Color(0x55FFFFFF)))
+            Icon(if (selected) Icons.Rounded.CheckCircle else Icons.Rounded.RadioButtonUnchecked,
+                if (selected) "Selected" else "Not selected",
+                tint = if (selected) OneUIBlue else Color.White,
+                modifier = Modifier.align(Alignment.TopEnd).padding(6.dp)
+                    .background(Color(0x99000000), RoundedCornerShape(12.dp)).size(24.dp))
         }
 
         // Video Badge & Duration

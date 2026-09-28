@@ -1,6 +1,7 @@
 package com.onegallery.app
 
 import android.Manifest
+import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color as AndroidColor
@@ -8,11 +9,14 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedContent
@@ -45,6 +49,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -56,8 +61,12 @@ import com.onegallery.app.ui.gif.GifCreatorViewModel
 import kotlinx.coroutines.launch
 import com.onegallery.app.domain.forAlbum
 import com.onegallery.app.domain.sortedBy
+import com.onegallery.app.data.MoveDestination
+import com.onegallery.app.data.MoveResult
 import com.onegallery.app.domain.MediaItem
+import com.onegallery.app.domain.toAlbums
 import com.onegallery.app.ui.grid.GalleryGridScreen
+import com.onegallery.app.ui.move.MoveToAlbumSheet
 import com.onegallery.app.ui.grid.TAB_PICTURES
 import com.onegallery.app.ui.theme.DarkBackground
 import com.onegallery.app.ui.theme.OneGalleryTheme
@@ -242,6 +251,48 @@ fun GalleryApp(viewModel: GalleryViewModel) {
     // System back / back gesture returns to the grid instead of leaving the app
     BackHandler(enabled = selectedItemIndex >= 0) { closeViewer() }
 
+    // --- Moving ---------------------------------------------------------------------------
+    // Two steps, because Android's consent dialog sits between them: the items waiting for a
+    // destination (the sheet is open), then the chosen move waiting for the user to allow it.
+    // Ids, not items, so a MediaStore update while the sheet is open cannot move a stale copy.
+    // Declared before the GIF creator's early return so the launcher is always registered.
+    val context = LocalContext.current
+    var moveIds by rememberSaveable { mutableStateOf<LongArray?>(null) }
+    var awaitingConsent by remember { mutableStateOf<Pair<List<MediaItem>, MoveDestination>?>(null) }
+    val consent = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        val move = awaitingConsent
+        awaitingConsent = null
+        if (result.resultCode == Activity.RESULT_OK && move != null) {
+            viewModel.move(move.first, move.second) { outcome ->
+                Toast.makeText(context, describeMove(outcome, move.second), Toast.LENGTH_LONG).show()
+                selectionMode = false
+                selectedImageIds = longArrayOf()
+            }
+        }
+    }
+    val moveItems = remember(moveIds, mediaItems) {
+        moveIds?.let { ids -> ids.toHashSet().let { wanted -> mediaItems.filter { it.id in wanted } } }
+    }
+    if (!moveItems.isNullOrEmpty()) {
+        MoveToAlbumSheet(
+            items = moveItems,
+            albums = remember(mediaItems) { mediaItems.toAlbums() },
+            onMove = { destination ->
+                moveIds = null
+                awaitingConsent = moveItems to destination
+                // One dialog for the whole batch; approved silently where the user has granted
+                // media management
+                consent.launch(
+                    IntentSenderRequest.Builder(viewModel.mover.writeRequest(moveItems).intentSender)
+                        .build()
+                )
+            },
+            onDismiss = { moveIds = null }
+        )
+    }
+
     if (gifCreator.draft != null) {
         GifCreatorScreen(gifCreator, onClose = {
             val saved = gifCreator.savedUri != null
@@ -278,7 +329,8 @@ fun GalleryApp(viewModel: GalleryViewModel) {
                 mediaItems = viewerItems,
                 initialIndex = selectedItemIndex,
                 onBack = closeViewer,
-                onVisibleItemChange = { viewerVisibleItemId = it }
+                onVisibleItemChange = { viewerVisibleItemId = it },
+                onMoveRequest = { moveIds = longArrayOf(it.id) }
             )
         } else {
             GalleryGridScreen(
@@ -319,6 +371,7 @@ fun GalleryApp(viewModel: GalleryViewModel) {
                 onSelectionModeChange = { selectionMode = it },
                 onSelectionChange = { selectedImageIds = it.toLongArray() },
                 onCreateGif = gifCreator::open,
+                onMove = { items -> moveIds = items.map { it.id }.toLongArray() },
                 onMediaSortChange = {
                     // Recorded against the album on screen, so each folder keeps its own order
                     viewModel.setMediaSort(openedAlbumId, it)
@@ -334,6 +387,21 @@ fun GalleryApp(viewModel: GalleryViewModel) {
             )
         }
     }
+}
+
+/** "Moved 12 items to Trips · 1 renamed", or why nothing moved. */
+private fun describeMove(result: MoveResult, destination: MoveDestination): String {
+    val notes = buildList {
+        if (result.renamed > 0) add("${result.renamed} renamed to avoid a clash")
+        if (result.alreadyThere > 0) add("${result.alreadyThere} already there")
+        if (result.failed > 0) add("${result.failed} couldn't be moved")
+    }
+    val head = when (result.moved) {
+        0 -> "Nothing moved to ${destination.label}"
+        1 -> "Moved 1 item to ${destination.label}"
+        else -> "Moved ${result.moved} items to ${destination.label}"
+    }
+    return (listOf(head) + notes).joinToString(" · ")
 }
 
 private const val VIEWER_ENTER_MS = 220
