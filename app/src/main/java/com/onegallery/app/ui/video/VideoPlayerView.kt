@@ -1,6 +1,8 @@
 package com.onegallery.app.ui.video
 
 import android.graphics.Bitmap
+import android.os.Handler
+import android.os.Looper
 import android.view.TextureView
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -97,6 +99,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
@@ -193,6 +198,19 @@ fun VideoPlayerView(
     // asynchronous, so without this the tap that triggers it moves the player *and* the open
     // separately decides where the walk began — one tap, two moves, and they disagree.
     var queuedSteps by remember(mediaItem.uri) { mutableIntStateOf(0) }
+    // The frame the player was quietly moved to underneath the still, once the user stopped
+    // tapping. When it matches the frame being left, pressing play needs no seek at all.
+    var parkedIndex by remember(mediaItem.uri) { mutableStateOf<Int?>(null) }
+    val mainHandler = remember { Handler(Looper.getMainLooper()) }
+    val handover = remember(mediaItem.uri) {
+        StillHandover(mainHandler) {
+            // Only if no new walk began while the player was catching up
+            if (stepIndex == null) {
+                stepBitmap = null
+                stepBitmapIndex = null
+            }
+        }
+    }
     var queuedFromMs by remember(mediaItem.uri) { mutableStateOf<Long?>(null) }
 
     // Where the next frame step counts from, or null to count from wherever the player is.
@@ -216,6 +234,12 @@ fun VideoPlayerView(
             // decoder per page for nothing.
             playWhenReady = false
             repeatMode = Player.REPEAT_MODE_ONE
+            // Called on the playback thread as each frame is released to the surface, with
+            // its media time (the renderer's stream offset already removed — checked in the
+            // 1.8.0 bytecode). This, not a timer, is what says the player has caught up.
+            setVideoFrameMetadataListener { presentationTimeUs, releaseTimeNs, _, _ ->
+                handover.onFrameReleased(presentationTimeUs, releaseTimeNs)
+            }
             addListener(object : Player.Listener {
                 override fun onIsPlayingChanged(playing: Boolean) {
                     isPlaying = playing
@@ -257,7 +281,9 @@ fun VideoPlayerView(
             // A still left over from a walk would cover the video when this page comes back
             stepJob?.cancel()
             prefetchJob?.cancel()
+            handover.cancel()
             stepIndex = null
+            parkedIndex = null
             stepBitmap = null
             stepBitmapIndex = null
         }
@@ -316,7 +342,21 @@ fun VideoPlayerView(
 
     DisposableEffect(exoPlayer) {
         onDispose {
+            handover.cancel()
             exoPlayer.release()
+        }
+    }
+
+    // Park the player under the still once the user stops tapping. The walk itself never
+    // touches the player; this is the one seek it owes, taken while nobody is waiting on it,
+    // so that play afterwards starts at once instead of starting with a seek.
+    LaunchedEffect(stepIndex, frameCache) {
+        val index = stepIndex ?: return@LaunchedEffect
+        val cache = frameCache ?: return@LaunchedEffect
+        delay(PARK_IDLE_MS)
+        if (parkedIndex != index) {
+            exoPlayer.seekTo(cache.positionMsFor(index))
+            parkedIndex = index
         }
     }
 
@@ -358,19 +398,19 @@ fun VideoPlayerView(
         stepJob = null
         prefetchJob?.cancel()
         prefetchJob = null
+        var handoverFromUs = 0L
         if (cache != null && index != null) {
             val position = cache.positionMsFor(index)
             currentPositionMs = position
-            exoPlayer.seekTo(position)
+            handoverFromUs = position * 1000
+            if (parkedIndex != index) exoPlayer.seekTo(position)
         }
+        parkedIndex = null
         stepIndex = null
         if (keepStillBriefly) {
-            coroutineScope.launch {
-                delay(STILL_HANDOVER_MS)
-                stepBitmap = null
-                stepBitmapIndex = null
-            }
+            handover.begin(handoverFromUs, exoPlayer)
         } else {
+            handover.cancel()
             stepBitmap = null
             stepBitmapIndex = null
         }
@@ -784,11 +824,11 @@ fun VideoPlayerView(
                         onValueChange = { newPos ->
                             // Dragging the bar abandons any frame walk outright: it is about to
                             // seek the player anyway, so there is nothing to hand back.
-                            if (stepIndex != null) {
+                            val leavingWalk = stepIndex != null
+                            if (leavingWalk) {
                                 stepJob?.cancel()
                                 stepIndex = null
-                                stepBitmap = null
-                                stepBitmapIndex = null
+                                parkedIndex = null
                             }
                             // Same warm-codec path the fallback frame steps use: a drag is
                             // dozens of exact seeks in a row
@@ -797,6 +837,10 @@ fun VideoPlayerView(
                             // Stepping after a drag continues from where the drag left off
                             stepAnchorMs = newPos.toLong()
                             exoPlayer.seekTo(newPos.toLong())
+                            // Keep the still until the drag's own first frame is drawn, or
+                            // the frame the player was parked on flashes up first — the
+                            // same race as pressing play. Armed after the seek is queued.
+                            if (leavingWalk) handover.begin(0L, exoPlayer)
                         },
                         onValueChangeFinished = {
                             seekPositionMs?.let { dragged ->
@@ -876,13 +920,89 @@ private const val ACTIVATION_DELAY_MS = 150L
 /** How long after the last user-driven seek the player leaves scrubbing mode. */
 private const val SCRUBBING_IDLE_MS = 900L
 
+/** How long the user has to stop tapping before the player is parked under the still. */
+private const val PARK_IDLE_MS = 400L
+
 /**
- * How long the stepped-to still is kept after handing the picture back to the player.
+ * Hands the picture from the stepped-to still back to the player — but only once the player
+ * has actually drawn a frame at or past where the walk ended.
  *
- * The player has just been given a seek and has not rendered it yet; dropping the still on the
- * same frame would show the position the walk started from for as long as that seek takes.
+ * A timer cannot do this. The seek that precedes playback takes as long as it takes: 150 ms was
+ * plenty on the emulator and nowhere near enough for 4K on a phone, and for however long it
+ * ran over, dropping the still uncovered what the player's surface was still holding — the
+ * frame the walk *started* from, before playback jumped forward to the right one.
+ *
+ * [onFrameReleased] is fed by ExoPlayer's `VideoFrameMetadataListener`, on the playback thread,
+ * as each frame goes to the surface. The still is dropped once that frame is on screen: after
+ * its release time, plus a vsync so the surface has composited it. [TIMEOUT_MS] is the
+ * backstop — a still must never outlive a player that, for whatever reason, draws nothing.
+ *
+ * Every [begin] bumps a generation, so a release or a timeout belonging to an earlier handover
+ * cannot drop a still that a newer walk has put up since.
  */
-private const val STILL_HANDOVER_MS = 150L
+@androidx.annotation.OptIn(UnstableApi::class)
+private class StillHandover(
+    private val main: Handler,
+    private val dropStill: () -> Unit
+) {
+    /** Media time the player must reach, in microseconds; -1 when nothing is pending. */
+    private val targetUs = AtomicLong(-1L)
+    private val generation = AtomicInteger(0)
+    /** Whether frames count yet — see [begin]. */
+    private val armed = AtomicBoolean(false)
+
+    /**
+     * Keep the still until the player draws a frame at or past [fromUs] — one drawn *after*
+     * everything already queued on [player], the seek included, has been processed.
+     *
+     * "At or past" alone is not enough. A walk that stepped back from where the player was
+     * parked ends *behind* the frame the player last drew, so that stale frame already
+     * satisfies it: stepping 103 → 100 and pressing play used to show 103 before playing from
+     * 100. ExoPlayer works through its messages in order on the playback thread, so a message
+     * sent now, and delivered on that same thread, runs only once the seek has been handled and
+     * the decoder flushed. It arms the handover; nothing released before it counts.
+     */
+    fun begin(fromUs: Long, player: ExoPlayer) {
+        val current = generation.incrementAndGet()
+        armed.set(false)
+        targetUs.set(fromUs.coerceAtLeast(0L))
+        player.createMessage { _, _ -> if (generation.get() == current) armed.set(true) }
+            .setLooper(player.playbackLooper)
+            .send()
+        main.postDelayed({ finish(current) }, TIMEOUT_MS)
+    }
+
+    fun cancel() {
+        generation.incrementAndGet()
+        armed.set(false)
+        targetUs.set(-1L)
+    }
+
+    /** Playback thread. */
+    fun onFrameReleased(presentationTimeUs: Long, releaseTimeNs: Long) {
+        if (!armed.get()) return
+        val target = targetUs.get()
+        if (target < 0L || presentationTimeUs < target) return
+        if (!targetUs.compareAndSet(target, -1L)) return
+        val current = generation.get()
+        val untilShownMs = ((releaseTimeNs - System.nanoTime()) / 1_000_000L).coerceAtLeast(0L)
+        main.postDelayed({ finish(current) }, untilShownMs + ONE_VSYNC_MS)
+    }
+
+    private fun finish(expected: Int) {
+        if (generation.get() != expected) return
+        armed.set(false)
+        targetUs.set(-1L)
+        // Retire this generation so the timeout, or a late release, cannot fire it again
+        generation.incrementAndGet()
+        dropStill()
+    }
+
+    private companion object {
+        const val TIMEOUT_MS = 2_500L
+        const val ONE_VSYNC_MS = 17L
+    }
+}
 
 /**
  * m:ss.t — the only clock format in the player.
