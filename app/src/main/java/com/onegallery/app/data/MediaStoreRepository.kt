@@ -7,6 +7,7 @@ import android.content.Context
 import android.database.ContentObserver
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
@@ -27,6 +28,7 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.transform
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -35,6 +37,13 @@ import java.util.Locale
 class MediaStoreRepository(private val context: Context) {
 
     private val contentResolver: ContentResolver = context.contentResolver
+
+    /**
+     * Paths already handed to the scanner in this process. A row the scanner decides to keep is
+     * not re-reported on every re-query — the scanner has the final word, and asking it again
+     * each time a photo arrives would be noise.
+     */
+    private val scanRequested: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     fun observeMediaItems(): Flow<List<MediaItem>> = callbackFlow<Unit> {
         // The observer only signals; the query itself runs downstream on Dispatchers.IO
@@ -65,11 +74,41 @@ class MediaStoreRepository(private val context: Context) {
     }
         .conflate()
         .transform<Unit, List<MediaItem>> {
-            emit(queryMediaItems())
+            val items = queryMediaItems()
+            emit(items)
+            // After emitting, so the grid never waits on it
+            reconcileMissingFiles(items)
             // Bursts of changes (camera burst, sync, our own snapshot insert) collapse into one re-query
             delay(CHANGE_BURST_WINDOW_MS)
         }
         .flowOn(Dispatchers.IO)
+
+    /**
+     * Asks MediaStore to re-check any row whose file is no longer where the row says it is.
+     *
+     * MediaStore can hold a row for a file that has gone — most visibly after another app moves
+     * a batch of files, where an occasional original is left behind as a row pointing at an
+     * empty spot in the old folder. Anything that reads the filesystem (a file manager) or keeps
+     * its own index (Google Photos) never sees it; a gallery that trusts MediaStore shows a
+     * phantom in the folder the file left. Reproduced on the emulator by inserting a row for a
+     * path that does not exist: it appeared as its own album.
+     *
+     * The check here only *nominates*. It never hides anything on its own say-so, because a
+     * `File.exists()` that comes back false for a file that is really there — an access quirk,
+     * a volume mid-mount — would make a real photo vanish. The scanner has full access and the
+     * final word: for a path that is really empty it deletes the row, which notifies the
+     * observer above and the phantom leaves with the next query. It repairs MediaStore itself,
+     * so every other app that reads it is corrected too.
+     */
+    private fun reconcileMissingFiles(items: List<MediaItem>) {
+        val missing = items.asSequence()
+            .map { it.path }
+            .filter { it.isNotBlank() && it !in scanRequested && !File(it).exists() }
+            .toList()
+        if (missing.isEmpty()) return
+        scanRequested.addAll(missing)
+        MediaScannerConnection.scanFile(context, missing.toTypedArray(), null, null)
+    }
 
     fun queryMediaItems(bucketIdFilter: String? = null): List<MediaItem> {
         val items = mutableListOf<MediaItem>()
