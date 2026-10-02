@@ -58,6 +58,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -129,7 +130,36 @@ fun MediaViewerScreen(
     // The pager re-clamps its page only on the next measure pass, so when the library shrinks
     // (file deleted elsewhere) currentPage can briefly point past the end of the new list.
     val currentPage = pagerState.currentPage.coerceIn(0, mediaItems.lastIndex)
-    val currentItem = mediaItems[currentPage]
+
+    // --- Which item is on screen: by identity, never by page number --------------------------
+    // The list can change under the viewer at any moment — a snapshot saved from the video being
+    // watched, a file moved, a photo arriving from the camera. Everything that used to read the
+    // page *number* then pointed at the wrong item until the pager caught up a frame later: the
+    // video counted as "not the active page", was paused and its frame walk dropped, then became
+    // active again, and activation means autoplay. That was "taking a snapshot starts the video",
+    // and the filmstrip and top bar briefly following a neighbour.
+    //
+    // So the viewer keeps the id of the item on screen ([ViewerAnchor]). It moves to whatever page
+    // settles after a swipe or a filmstrip scrub, in the same frame the page settles; a change to
+    // the *list* leaves it alone, and the pager is asked to stay on that item wherever it now sits.
+    val anchor = remember { ViewerAnchor(mediaItems, pagerState.settledPage) }
+    val reanchorTo = anchor.onComposition(mediaItems, pagerState.settledPage)
+    // requestScrollToPage is made for exactly this — holding a position steady through a data
+    // change — and applies in the coming measure pass, so the frame that shows the new list
+    // already shows it at the right page. Only on a list change: re-anchoring any time the page
+    // and the remembered item disagree also fires the moment a swipe ends, and bounced the user
+    // back to where they came from.
+    if (reanchorTo != null && reanchorTo != pagerState.currentPage && !pagerState.isScrollInProgress) {
+        pagerState.requestScrollToPage(reanchorTo)
+    }
+    val shownId = anchor.shownId
+    val shownIndex = mediaItems.indexOfFirst { it.id == shownId }
+    val latestShownIndex by rememberUpdatedState(shownIndex)
+    // Mid-swipe the top bar follows the page under the finger; otherwise the anchored item
+    val currentItem =
+        if (pagerState.isScrollInProgress) mediaItems[currentPage]
+        else mediaItems.getOrNull(shownIndex) ?: mediaItems[currentPage]
+    val anchoredPage = if (shownIndex >= 0) shownIndex else currentPage
 
     // Keep the caller told which item is showing, so backing out can land the grid here even
     // if the user paged or scrubbed far from where they entered.
@@ -161,7 +191,9 @@ fun MediaViewerScreen(
             key = { index -> mediaItems[index].id }
         ) { pageIndex ->
             val item = mediaItems[pageIndex]
-            val isActivePage = pagerState.settledPage == pageIndex
+            // By id: a page number can point at a different item for a frame after the list
+            // changes, which used to pause and then autoplay the video being watched
+            val isActivePage = item.id == shownId
 
             if (item.isVideo) {
                 // Video controls share the viewer's overlay visibility, so one tap hides/shows both
@@ -290,8 +322,17 @@ fun MediaViewerScreen(
                 // Samsung Filmstrip Infinity Scrubber
                 FilmStripInfinityViewer(
                     mediaItems = mediaItems,
-                    currentIndex = currentPage,
-                    pagerPosition = { pagerState.currentPage + pagerState.currentPageOffsetFraction },
+                    currentIndex = anchoredPage,
+                    // Mirrors the swipe 1:1 while there is one; otherwise sits on the anchored item,
+                    // so a list change cannot drag the strip to a neighbour for a frame
+                    pagerPosition = {
+                        if (pagerState.isScrollInProgress) {
+                            pagerState.currentPage + pagerState.currentPageOffsetFraction
+                        } else {
+                            latestShownIndex.takeIf { it >= 0 }?.toFloat()
+                                ?: pagerState.currentPage.toFloat()
+                        }
+                    },
                     onItemSelected = { targetIndex ->
                         // Snap, don't animate: the strip reports every thumbnail it passes while
                         // scrubbing, and the pager has to keep up with it 1:1
@@ -524,6 +565,45 @@ private fun ZoomableImageView(
  * either is laid out. The row is given this height explicitly so the two stay in agreement.
  */
 private val ViewerActionRowHeight = 52.dp
+
+/**
+ * Which item the viewer is showing, by id, across changes to the list underneath it.
+ *
+ * Driven from composition so that it is never a frame behind: a page that settles is adopted in
+ * the composition that sees it settle, and a new list is recognised in the composition that
+ * receives it. An effect-driven version lagged a frame, and in that frame the page that had just
+ * been swiped to looked like a stray and was pulled back.
+ */
+private class ViewerAnchor(initialList: List<MediaItem>, initialSettledPage: Int) {
+    private var list = initialList
+    private var settledPage = initialSettledPage
+    var shownId by mutableStateOf(initialList[initialSettledPage.coerceIn(0, initialList.lastIndex)].id)
+        private set
+
+    /**
+     * Returns the page the pager must move to so that the shown item stays on screen, when the
+     * list has just changed and the item now sits elsewhere; otherwise null.
+     */
+    fun onComposition(newList: List<MediaItem>, newSettledPage: Int): Int? {
+        if (newList !== list) {
+            list = newList
+            // Whatever settledPage says now still refers to the old list — not a navigation
+            settledPage = newSettledPage
+            val index = newList.indexOfFirst { it.id == shownId }
+            if (index < 0) {
+                // The item itself left (moved out of this album, deleted): show what replaced it
+                shownId = newList[newSettledPage.coerceIn(0, newList.lastIndex)].id
+                return null
+            }
+            return index
+        }
+        if (newSettledPage != settledPage) {
+            settledPage = newSettledPage
+            newList.getOrNull(newSettledPage)?.let { shownId = it.id }
+        }
+        return null
+    }
+}
 
 private const val FULL_RES_DELAY_MS = 120L
 private const val DOUBLE_TAP_ZOOM_MS = 220
