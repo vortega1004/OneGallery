@@ -1,10 +1,20 @@
 # OneGallery — Engineering Handoff
 
-**Last verified:** 2026-10-02 — a snapshot no longer restarts the video or flicks the viewer
-to a neighbour (the viewer follows items by id), and files can be moved into *any* folder once
-the user grants All files access. Both reproduced first on the emulator with generated clips,
-then fixed, then put through the regression pass in §9. Owner's rule: **never test on his
-phone** — reproduce with clips made or downloaded for the purpose.
+**Last verified:** 2026-10-02 (second pass, branch `viewer-controls-and-gif-tabs`, not yet
+merged) — the snapshot bug the owner still saw on his phone is reproduced on the emulator and
+fixed at its cause: on a library large enough to span two cursor windows, a row inserted while
+the library was being read made MediaStore skip the newest video for one refresh, and the
+viewer moved on to its neighbour. The library is now read in id-keyed pages (also ~10× faster
+on a 10,589-item test library). Same pass: the app opens on Albums with no tabs, the video
+controls are a two-row cluster that takes the top bar off the picture while frames are walked,
+the file name moved to the top bar as a tap-to-expand chip, the action bar reads Delete ·
+Favorite · Edit · Share and Share works, the GIF creator's tools are split into four tabs, and
+two tap bugs were fixed (a step that landed one frame back; a quick tap that did nothing).
+Regression pass in §9 run on the AVD. Owner's rule: **never test on his phone** — reproduce
+with clips made or downloaded for the purpose.
+Before that (2026-10-02, first pass), a snapshot no longer restarts the video or flicks the
+viewer to a neighbour (the viewer follows items by id), and files can be moved into *any*
+folder once the user grants All files access.
 Before that, 2026-09-28 — files can be moved between albums in the app (grid
 multi-select and the viewer's ⋮ menu); rows left behind by another app's moves are repaired;
 and play after a frame walk no longer flashes the frame the walk began on. All three
@@ -108,9 +118,9 @@ crashes** on either. Anything the emulator's tiny library cannot exercise is cal
 
 | Item | Status |
 | --- | --- |
-| `gradlew assembleDebug` | **VERIFIED PASSING** — ~21 MB `app-debug.apk` |
-| `gradlew assembleRelease` | **VERIFIED PASSING** — 4 MB minified (R8 + `proguard-rules.pro` work) |
-| Compile warnings | **Zero from this project's sources** — verified with `gradlew clean` then `assembleDebug assembleRelease testDebugUnitTest --rerun-tasks`, which is the only way to see them (see §9). Four `Icons.Rounded.*` deprecations were live and this row wrongly said zero: `VolumeOff`/`VolumeUp` (`VideoPlayerView`) and `RotateLeft`/`RotateRight` (`PhotoEditorScreen`). All four are fixed by moving to `Icons.AutoMirrored.Rounded.*`, not suppressed. The AGP-vs-`compileSdk` advisory from the toolchain is unrelated to the sources and still prints |
+| `gradlew assembleDebug` | **VERIFIED PASSING** (2026-10-02, second pass, from `clean`) — 66 MB `app-debug.apk` |
+| `gradlew assembleRelease` | **VERIFIED PASSING** (same) — 4.9 MB minified (R8 + `proguard-rules.pro` work). `lintVitalAnalyzeRelease` failed once mid-run on this machine and passed on its own straight after; nothing in the sources changed between the two |
+| Compile warnings | **Zero from this project's sources** (re-verified 2026-10-02, second pass) — verified with `gradlew clean` then `assembleDebug assembleRelease testDebugUnitTest --rerun-tasks`, which is the only way to see them (see §9). Four `Icons.Rounded.*` deprecations were live and this row wrongly said zero: `VolumeOff`/`VolumeUp` (`VideoPlayerView`) and `RotateLeft`/`RotateRight` (`PhotoEditorScreen`). All four are fixed by moving to `Icons.AutoMirrored.Rounded.*`, not suppressed. The AGP-vs-`compileSdk` advisory from the toolchain is unrelated to the sources and still prints |
 | Grid + live refresh | **VERIFIED** — thumbnails render; `ContentObserver` picked up new media 7 → 8 → 9 items with no restart |
 | Pager swiping | **VERIFIED** — advances; the old gesture-starvation bug is gone |
 | Filmstrip 1:1 sync | **VERIFIED** — active thumbnail spans x582–762, centre 672 on a 1344 px screen (dead centre) |
@@ -161,6 +171,16 @@ crashes** on either. Anything the emulator's tiny library cannot exercise is cal
 | Step-anchor fix, before/after | **VERIFIED that behaviour changed**, at two different precisions. Before the fix, 10 rapid taps moved the readout by ~0.1 s; after, by ~0.33 s. Tenths cannot resolve one frame, but it comfortably separates ~3 frames from ~10, so the *contrast* holds. The exact post-fix count (10) comes from the frame-number clip, not from that readout. There is no frame-level capture of the pre-fix build |
 | Sort order survives a cold start | **VERIFIED on emulator** — set Pictures to Name (Z–A), `am force-stop`, relaunch: still Name (Z–A). Same for the album list (Largest on disk) and for an individual album (Date added (oldest)). Kill was a full process stop, not a back-out |
 | Sort order is per album | **VERIFIED on emulator** — Pictures on Name (Z–A) while one album is on Date added (oldest); neither disturbs the other, and both survive the cold start above. A folder never sorted by hand follows the last order chosen anywhere (checked: a fresh album opened showing Name (Z–A) inherited from Pictures) |
+| Snapshot on the newest video of a large library | **REPRODUCED, THEN VERIFIED FIXED on emulator**, 10,589-item library (7,000 photos + 3,500 videos with 150-character names, plus the clips). Unmodified build: paused on a frame step, one tap of the shutter, and the viewer was showing *another* video, playing, with the first gone from the strip — the owner's report exactly (screen recording). Logged cause on the same build: of 14 library reads during a burst of inserts, one returned every row but the last video. Fixed build, same video: 12 snapshots in a row, still paused on the same frame (9 / 10) with the same thumbnail centred after every one; 117 reads during the insert burst, none short |
+| Library read time at scale | **MEASURED on emulator**, 10,589 rows with long paths: ~1,500 ms per refresh with the single query, 125–220 ms (median ~145 ms) with 500-row id-keyed pages. Same rows, same emulator; the phone will differ in both numbers but not in the ratio |
+| First frame step after a pause | **FIXED, VERIFIED on emulator** against burned-in frame numbers. Before: pause showing 227, press next, get 226. After: pause showing 48, press next, get 49; six alternating next/previous taps each moved exactly one frame; 20 rapid taps moved 20 |
+| A quick tap on a step button | **FIXED, VERIFIED on emulator** — the first step was taken inside a launched coroutine, and `input tap`'s instant release cancelled it before it ran, so roughly one tap in ten did nothing. The first step now runs on the press itself; 12 alternating taps all counted |
+| Drag that starts on a control | **VERIFIED on emulator** — a 500 px swipe beginning on the shutter, and one beginning on the next-frame button, left the pager where it was (the button press still counted); the same swipe on the picture paged to the next video and back |
+| Top bar during a frame walk | **VERIFIED on emulator** — pause alone keeps it; the first step takes it down; a tap on the picture (off) and another (on) brings it back; play brings it back |
+| File name chip | **VERIFIED on emulator** — reads `…_names` for the 150-character test name, `…lip_V3` for `clip_V3.mp4`; a tap on it shows the full name under the bar, a tap on the name hides it; five unit tests on the shortening rule |
+| Jog bar with buttons on its ends | **VERIFIED on emulator** — 360 px drag left on the strip went 150 → 159, the same drag right 159 → 150 (±9: 360 px less touch slop at 12 dp a frame on 480 dpi); the end buttons step and repeat as the old separate buttons did |
+| Albums-only start | **VERIFIED on emulator** — cold start lands on the album list; no bottom bar outside selection; back from an album returns to the list; the mixed selection bar still reads Move (2) / GIF (1) for a still plus a video, and the move itself landed on disk |
+| GIF creator tabs | **VERIFIED on emulator** — Frames / Playback / Crop / Size each show their tools with labels; the crop frame appears with the Crop tab and goes with it; the preview does not resize between tabs |
 | Media3 1.4.1 → 1.8.0 | **VERIFIED building and running on emulator** — required for `ExoPlayer.setScrubbingModeEnabled`. No API breakage; `PlayerView` unchanged |
 | `viewer-features` (PR #2) | **VERIFIED on emulator** at `1ea2d9f`. Compiles first try (4 deprecation warnings: `RotateLeft`/`RotateRight`/`VolumeUp`/`VolumeOff`); 17 unit tests pass; release APK 4.27 MB. Re-checked the VERIFIED behaviours it touches: frame capture still 1280×720 with EXIF + `Captured from…` UserComment; overlay collision clear (capture y2128, seek y2332, filmstrip y2578); album scoping correct with no stale `viewerAlbumId`; grid restore returns to the photo last viewed. Editor rotate→save copy: 480×360 → 360×480, EXIF carried, original untouched. Zero crashes. Owner independently confirmed on the emulator. **Not exercised:** crop / brightness / contrast / saturation, frame stepping, jog strip, swipe-up tuning, rewritten pinch — all need real touch |
 
@@ -280,6 +300,22 @@ app/src/main/
         ├── video/VideoSnapshotManager.kt         # Dual-path frame extraction
         └── theme/{Color,Theme}.kt                # One UI palettes
 ```
+
+### Reading the library
+
+`MediaStoreRepository.queryMediaItems` reads in **pages of 500 rows keyed on `_id`** (`_id > ?`,
+`ORDER BY _id`, `LIMIT 500`), not in one query. One query is not one read: a cursor from
+another process arrives in ~2 MB windows, and every window after the first is filled by
+*re-running* the query and skipping to a row number. A row inserted between two fills shifts
+every later row by one, so the row on the boundary is read twice and the last row is never
+read — and the count, taken on the first fill, still looks right. See §6a for what that did to
+the viewer. A 500-row page fits one window with room to spare at the longest names the
+filesystem allows, so each page is one consistent read, and keying on the last id seen means a
+change between pages cannot shift anything. It is also much faster at scale (§1): the window
+refills were re-running the full query several times per refresh.
+
+Ties in the sort are broken by id. Copies of one file share both dates, and without a
+tie-break two refreshes could order the same items differently.
 
 ### Image loading
 
@@ -671,15 +707,16 @@ frame.
 
 `MediaViewerScreen.kt` (action bar)
 
-Share, Favorite, Delete and More are empty lambdas. `isFavorite` is hardcoded `false` and never
-read from `MediaStore.IS_FAVORITE`. **Edit is implemented** (PR #2): stills only, saves a
-copy. Not covered: video trim, GIFs, overwrite-original, free rotation /
+Favorite and Delete are empty lambdas. `isFavorite` is hardcoded `false` and never read from
+`MediaStore.IS_FAVORITE`. **Share is implemented** (2026-10-02, second pass): `ACTION_SEND`
+with the item's MediaStore Uri through the system chooser. **Edit is implemented** (PR #2):
+stills only, saves a copy. Not covered: video trim, GIFs, overwrite-original, free rotation /
 straighten, aspect-*locked* crop dragging (presets only place the rectangle), and Ultra HDR
 gain maps (the saved copy is SDR).
 
-**Albums is now implemented** (folder grid → folder contents → viewer scoped to that folder).
-**Search is still unimplemented** but now says so on screen instead of silently rendering the
-Pictures grid.
+**Albums is now implemented** (folder grid → folder contents → viewer scoped to that folder)
+and is the only way in: the Pictures and Search tabs, and the bottom bar, were removed at the
+owner's request (2026-10-02, second pass).
 
 ### 6.15 Filmstrip scrubbing — LARGELY FIXED, residual stutter
 
@@ -703,12 +740,14 @@ recomposition: every visible filmstrip thumbnail recomposes as the mirrored scro
 updates during a pager drag. That is a different fix from this one. Measure before changing
 anything, and measure on a real library — none of this reproduces on the emulator.
 
-### 6.16 Grid is slow to first paint at scale — PARTIALLY ADDRESSED
+### 6.16 Grid is slow to first paint at scale — LARGELY ADDRESSED, not re-measured on the Pixel
 
 Owner, on the Pixel: "doesn't populate that fast, but it's not unbearable." Thumbnail decoding
-is now cheap (§4), but the structural half is untouched: `MediaStoreRepository.queryMediaItems`
-still loads the **entire** library into memory on every change, with no pagination. Not
-re-measured since the thumbnail work.
+is cheap (§4), and since 2026-10-02 the library is read in id-keyed pages, which on a
+10,589-item emulator library cut a refresh from ~1.5 s to ~145 ms (§1). The whole library is
+still held in memory on every change — that is by design for now (every screen derives from
+the one list) — and the on-disk check of each path runs only for paths not seen in the last
+minute. Not re-measured on the Pixel since either change.
 
 ### 6.5 Every video page still builds its own ExoPlayer — LOW (was MEDIUM)
 
@@ -845,6 +884,30 @@ Changing either of these back will break things silently, with no error:
   both the demanded frame and the read-ahead — so during exactly the fast walk it exists to
   smooth, every tap killed the decode that would have fed the tap after it. Separate jobs, and
   only the demanded-frame one is cancellable. (§4)
+- **One MediaStore query is not one consistent read.** The cursor comes across in ~2 MB
+  windows, each filled by re-running the query and skipping to a row number; an insert in
+  between shifts the rows, duplicating one and dropping the last. The last row in the files
+  table's natural order is the newest *video*, and this app's own snapshot is the insert — so
+  the video being watched vanished from one refresh and the viewer, correctly following its
+  rules, moved to the neighbour. Needs a library that spans two windows (thousands of items,
+  fewer with long names), which is why no 50-item test library ever showed it and the owner's
+  phone always did. Reproduced on the emulator with 10,589 long-named items, logged, and fixed
+  by reading in id-keyed pages (§4). Do not go back to a single query, however clean it looks.
+- **A step's "from" frame is the frame on screen, not the clock.** `currentPosition` runs a
+  little ahead of or behind the picture, so reading it as a frame number started the walk one
+  frame off: pause on 227, press next, get 226. The player reports each frame it sends to the
+  surface (`VideoFrameMetadataListener`), and `lastFrameUs` keeps the latest; the walk and the
+  snapshot both start from that. Verified against burned-in numbers (§1).
+- **Take the first step on the press, not in a launched coroutine.** A coroutine launched from a
+  pointer handler starts on the next dispatch; a quick tap's release — and the cancel it
+  triggers — can arrive before that, and the tap does nothing. The repeat-while-held loop is
+  fine in the coroutine; the first step is not. Found with `input tap`, which lifts instantly;
+  a finger is slower but not always slower enough.
+- **Buttons over the pager must own their drag.** `clickable` lets go the moment the finger
+  moves, and the pager underneath takes over — a thumb that slides a few pixels while pressing
+  the shutter paged to the next video. `ownedPress` (ui/common) consumes every move for as long
+  as the finger is down. The jog strip already did this for its own drags; a sideways swipe
+  started in the *gaps* of the cluster still pages, as before.
 - **Grid state must stay hoisted in `GalleryApp`.** The viewer replaces the grid in the
   composition rather than stacking on it, so anything remembered inside `GalleryGridScreen` is
   destroyed when a photo opens. (§4)
@@ -852,6 +915,72 @@ Changing either of these back will break things silently, with no error:
 ---
 
 ## 7. Changelog
+
+### 2026-10-02 (second pass) — the snapshot bug at its root; Albums-only; controls rework; GIF tabs
+
+Branch `viewer-controls-and-gif-tabs`, committed and **held** for the owner to look at.
+
+Owner: *"I still get bugs when I am on the first video off an album. I hit the right frame
+button to move it by one frame then if I take a snapshot with the ui button the video suddenly
+goes away in the film strip and its playing the next video"*; *"I dont want to see the options
+for pictures or search. I only want to start in Albums"*; *"remove the top overlay when we are
+using the navigation buttons like frame scrolling"*; *"The image file name does not need to be
+visible where my fingers press and I only want to see the last six characters. if I tap the
+file name I want to see the full name"*; *"put the left and right frame increment buttons on
+the end of the frame scroller … shift it left so its reachable with my right thumb"*; *"Move
+the delete button to the left … it should be delete, heart, edit, share"*; *"its super easy to
+confuse the frame mover with the speed selector … I want tabs"*. And: *"add like 50 videos to
+a folder … try with really long file names. and possible duplicate copies with (1) (2)"*.
+
+**The snapshot bug.** His own steps, on a 51-video album of 150-character names with (1)/(2)
+copies, did nothing on the emulator — six tries, with and without All files access. Fifty
+videos was not the condition; *his library* was. On a library large enough to span two cursor
+windows, a MediaStore read that overlaps an insert skips its last row, and the last row in
+natural order is the newest video — which, newest-first, is the first video of its album.
+That is "the first video off an album" and the earlier "only in certain videos and folders";
+the snapshot is the insert, and the frame step is incidental. With the viewer following items
+by id (first pass) the vanished item is replaced by its neighbour, which is "playing the next
+video"; before that fix the same tear was the "disappears briefly and shows me the next video
+then the first video appears again". Reproduced with 7,000 + 3,500 generated files: the
+unmodified build's read log shows a refresh missing the last video, and on screen one snapshot
+sent the viewer to another video. The read is now id-keyed pages (§4, §6a); same test on the
+fixed build, 12 snapshots, nothing moved. Also ~10× faster at that scale (§1), and the per-path
+disk check (`reconcileMissingFiles`) no longer stats every file on every refresh.
+
+**Two tap bugs found on the way.** The first step after a pause landed one frame *back* —
+the walk started from the clock, not the picture; it now starts from the frame the player last
+drew, and so does the snapshot. And about one quick tap in ten on a step button did nothing,
+because the first step ran in a coroutine the release cancelled before it started.
+
+**Albums only.** No tabs, no bottom bar outside selection; cold start is the album list. The
+flat Pictures grid and the Search placeholder are gone from `GalleryGridScreen`, with the
+state that served them (`selectedTab`, `picturesGridState`).
+
+**Video controls.** Two rows. The top bar leaves while frames are walked and returns on play
+or on the next tap that brings the chrome up. The jog strip and the two step buttons are one
+pill (`FrameJogBar`) sitting under the right thumb, between a two-line readout on the far
+left (fps and frame count, or `frame` and `n / N` while walking) and the shutter in the
+corner. The file name moved to the top bar as a chip showing its last six characters, tap to
+expand. Every ghost button now owns its press (`ownedPress`), so a thumb that slides while
+pressing can no longer page the viewer. Action bar: Delete · Favorite · Edit · Share, and Share
+sends the item through the system chooser.
+
+**GIF creator.** Four tabs — Frames (move earlier/later, duplicate, remove), Playback (speed,
+direction), Crop (presets, rotate, reset; the crop frame is up while the tab is), Size (canvas,
+output, folder) — with play and the frame strip above them on every tab, and every tool
+labelled. The tool panel has a fixed height so the preview does not resize between tabs.
+
+**Filmstrip.** User scrubbing is now detected from the drag interaction (and the glide to a
+tapped thumbnail) rather than inferred from "a scroll we did not start", which a flag raised
+and lowered around the pager-led scroll could not reliably tell apart. No symptom was tied to
+it; it was the one place a pager-led move could have been echoed back as a page change.
+
+Not done: Delete and Favorite are still empty (§6.4); nothing here has run on the Pixel.
+
+Test library on the AVD for this pass: the 25 photos and 3 clips from the first setup; `Clips`
+(three 12 s clips); `ManyVideos` (17 clips × 3 copies, 150-character names); `Bulk` (7,000
+tiny photos) and `BulkVid` (3,500 one-second videos), the last two only to reach two cursor
+windows. 50 unit tests pass (5 new, `ShortDisplayNameTest`).
 
 ### 2026-10-02 — snapshots leave the video alone; moves into any folder
 
@@ -1322,8 +1451,13 @@ Roughly dependency-ordered. Good first tasks are marked ★.
    `PREFETCH_MARGIN` are the dials. Same run should cover the scrub change from PR #2 (§6.15) —
    keep or revert on numbers. Tune the one-handed control constants (`GhostVideoControls.kt`,
    `SwipeUpGesture.kt`) if reach or sensitivity is off.
-1. ★ **Paginate the library load** (§6.16). `queryMediaItems` pulls all 3,132 rows into memory
-   on every change. Now the largest remaining structural problem — thumbnail decoding is done.
+1. ★ **Run the 2026-10-02 second pass on the Pixel.** Everything in its §7 entry is
+   emulator-only. The things only the phone can answer: whether the snapshot bug is gone on
+   his library (it should be — the cause is the library's size, and the fix does not depend on
+   the emulator), whether the first step after a pause now lands on the frame he is looking at
+   with 4K60 HEVC, and whether the jog pill sits where his thumb is. Then merge.
+1'. **Paginate what the UI holds** (§6.16). The *read* is paged now; the whole library is still
+   kept in memory and every screen derives from it. Fine at 3k items; revisit if it is not.
 1a. **GIF creator cleanup** — deliberately *below* the two items above, which is where the
    owner put it. He has used the feature and wants polish, but has not said what; the first
    move is to get that list from him rather than to guess from §6.17.
@@ -1334,8 +1468,9 @@ Roughly dependency-ordered. Good first tasks are marked ★.
    Measure on the Pixel first; hardware decode may make this invisible.
 1d. **Date snapshots properly.** Write EXIF DateTimeOriginal (video date + position) into the
    JPEG so MediaStore keeps it; today every snapshot sorts as the newest item (§6a).
-1c. **Delete and Share on the multi-select bar.** Selection is general now, so both are small:
-   `createTrashRequest` and an `ACTION_SEND_MULTIPLE` intent, beside Move.
+1c. **Delete on the viewer's action bar and on the multi-select bar, Share on the latter.**
+   Share in the viewer is done; the rest is small: `createTrashRequest` and an
+   `ACTION_SEND_MULTIPLE` intent, beside Move.
 2. **Chase the residual filmstrip stutter** (§6.15) *only if it still bothers you*. Decoding is
    no longer the bottleneck; the next suspect is per-frame recomposition of visible thumbnails
    during a pager drag. Measure on a real library before changing anything.
@@ -1344,7 +1479,7 @@ Roughly dependency-ordered. Good first tasks are marked ★.
 4. Restore the real TextureView capture path (§6.3).
 5. Move `MediaStoreRepository` creation out of `VideoPlayerView` (it builds its own; pass the
    ViewModel's instance or a snapshot callback down instead).
-6. Implement Share and Delete via `MediaStore` + `IntentSender` (§6.4).
+6. Implement Delete and Favorite via `MediaStore` + `IntentSender` (§6.4).
 7. Wire sticky date headers to `queryGroupedByDate()` — it exists in the repository but
    nothing calls it. (The Albums tab is now done; it derives from `toAlbums()` rather than
    `queryAlbums()`, to avoid a second full-library query.)

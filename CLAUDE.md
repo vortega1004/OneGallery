@@ -49,14 +49,16 @@ app/src/main/java/com/onegallery/app/
 ├── MainActivity.kt                   # Permission gate, ACTION_VIEW handling, grid/viewer switch
 ├── GalleryViewModel.kt               # Owns the live MediaStore subscription (StateFlow)
 ├── data/
-│   └── MediaStoreRepository.kt       # Fast async query for photos, videos, albums, live observer
+│   └── MediaStoreRepository.kt       # Paged (id-keyed) MediaStore read, live observer, snapshot/edit writes
 ├── domain/
 │   └── MediaItem.kt                  # Models: MediaItem, MediaType (Photo, Video, MotionPhoto), Album
 ├── ui/
 │   ├── filmstrip/
 │   │   └── FilmStripInfinityViewer.kt # Jetpack Compose implementation of magnifying scrubber
 │   ├── video/
-│   │   ├── VideoPlayerView.kt         # Media3 ExoPlayer with floating snapshot shutter
+│   │   ├── VideoPlayerView.kt         # Media3 ExoPlayer, two-row ghost controls, snapshot shutter
+│   │   ├── GhostVideoControls.kt      # Ghost buttons and the jog bar (step buttons on its ends)
+│   │   ├── VideoFrameCache.kt         # Frames decoded in runs, walked by index while stepping
 │   │   └── VideoSnapshotManager.kt    # Dual-path frame extraction and EXIF background saver
 │   ├── viewer/
 │   │   ├── MediaViewerScreen.kt       # Fullscreen zoomable pager synchronized with FilmStrip
@@ -69,8 +71,9 @@ app/src/main/java/com/onegallery/app/
 │   │   └── PhotoEditRenderer.kt       # Applies an edit to a bitmap
 │   ├── common/
 │   │   └── MediaImageRequests.kt      # Shared Coil requests (thumbnail stand-in / full-size)
+│   ├── gif/                          # GIF creator (tabs: Frames, Playback, Crop, Size)
 │   ├── grid/
-│   │   └── GalleryGridScreen.kt       # Pinch-to-zoom 1-5 column grid with sticky date headers
+│   │   └── GalleryGridScreen.kt       # Album list -> album grid (the app starts here; no tabs)
 │   └── theme/
 │       ├── Color.kt                   # One UI color palette (AMOLED dark / light)
 │       └── Theme.kt                   # Squircle cards, rounded bottom sheets
