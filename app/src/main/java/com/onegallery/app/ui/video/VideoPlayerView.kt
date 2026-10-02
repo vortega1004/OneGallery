@@ -25,7 +25,6 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -40,8 +39,6 @@ import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Camera
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material.icons.rounded.SkipNext
-import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Slider
@@ -74,7 +71,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -109,7 +105,7 @@ import kotlin.math.roundToLong
 /**
  * Replicates Samsung Video Viewer with 1-Tap Instant Frame Capture:
  * - Direct floating shutter button (no edit mode needed!), bottom-right for the right thumb
- * - Frame-accurate stepping: jog strip + previous/next-frame buttons
+ * - Frame-accurate stepping: a jog strip with the previous/next-frame buttons on its ends
  * - "Ghost" controls (outline, barely-there fill) clustered lower-right; centre stays clear
  * - Instant frame capture with zero playback disruption
  * - Shutter flash feedback + animated thumbnail fly-in
@@ -123,6 +119,10 @@ import kotlin.math.roundToLong
  * Sound is controlled by the host ([isMuted]) rather than per player, so the choice carries
  * from one video to the next while the user pages through the viewer. Videos autoplay, so the
  * host is expected to start muted.
+ *
+ * [onFrameWalkChange] tells the host when the user starts walking frames and when they go back
+ * to playing. Someone stepping frame by frame is studying the picture, so the host takes its own
+ * chrome off it for as long as that lasts.
  */
 @OptIn(UnstableApi::class)
 @Composable
@@ -135,6 +135,7 @@ fun VideoPlayerView(
     controlsPadding: PaddingValues = PaddingValues(0.dp),
     isMuted: Boolean = true,
     onMutedChange: (Boolean) -> Unit = {},
+    onFrameWalkChange: (Boolean) -> Unit = {},
     onSnapshotTaken: ((Bitmap) -> Unit)? = null
 ) {
     val context = LocalContext.current
@@ -222,6 +223,12 @@ fun VideoPlayerView(
     // exactly: ten taps are ten frames, whether or not the decoder has caught up yet.
     var stepAnchorMs by remember(mediaItem.uri) { mutableStateOf<Long?>(null) }
 
+    // Media time of the frame the player last sent to the screen, in microseconds; -1 before the
+    // first one. This — not `currentPosition` — is "the frame the user is looking at". The clock
+    // runs a little ahead of or behind the picture, and reading it as a frame number put the
+    // first step of a walk on the wrong frame: pause on frame 227, press next, get 226.
+    val lastFrameUs = remember(mediaItem.uri) { AtomicLong(-1L) }
+
     val exoPlayer = remember(mediaItem.uri) {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(ExoMediaItem.fromUri(mediaItem.uri))
@@ -238,6 +245,7 @@ fun VideoPlayerView(
             // its media time (the renderer's stream offset already removed — checked in the
             // 1.8.0 bytecode). This, not a timer, is what says the player has caught up.
             setVideoFrameMetadataListener { presentationTimeUs, releaseTimeNs, _, _ ->
+                lastFrameUs.set(presentationTimeUs)
                 handover.onFrameReleased(presentationTimeUs, releaseTimeNs)
             }
             addListener(object : Player.Listener {
@@ -368,6 +376,18 @@ fun VideoPlayerView(
         onDispose { cacheToRelease?.close() }
     }
 
+    /** Where the frame on screen sits in the video, falling back to the clock before one is drawn. */
+    val shownPositionMs: () -> Long = {
+        val us = lastFrameUs.get()
+        if (us >= 0L) us / 1000 else exoPlayer.currentPosition
+    }
+
+    /** Which frame is on screen, for starting a walk from it. */
+    val shownFrameIndex: (VideoFrameCache) -> Int = { cache ->
+        val us = lastFrameUs.get()
+        if (us >= 0L) cache.nearestIndexFor(us / 1000) else cache.indexFor(exoPlayer.currentPosition)
+    }
+
     /**
      * Puts the player in scrubbing mode for a burst of user-driven seeks.
      *
@@ -442,6 +462,7 @@ fun VideoPlayerView(
 
     val stepFrames: (Int) -> Unit = { frames ->
         exoPlayer.pause()
+        onFrameWalkChange(true)
         val cache = frameCache
         if (cache == null && !frameCacheOpened) {
             // The cache is on its way. Bank the step rather than seeking for it — the open will
@@ -449,7 +470,7 @@ fun VideoPlayerView(
             if (queuedFromMs == null) queuedFromMs = exoPlayer.currentPosition
             queuedSteps += frames
         } else if (cache != null) {
-            val from = stepIndex ?: cache.indexFor(exoPlayer.currentPosition)
+            val from = stepIndex ?: shownFrameIndex(cache)
             val target = (from + frames).coerceIn(0, cache.lastIndex)
             stepIndex = target
             // The number is the whole point of the readout: it must be true the moment the
@@ -509,7 +530,10 @@ fun VideoPlayerView(
                 frameCache = opened
                 frameCacheOpened = true
                 if (opened != null) {
-                    val index = (opened.indexFor(from) + steps).coerceIn(0, opened.lastIndex)
+                    // The player has been paused since the first banked step, so the frame it
+                    // last drew is still the one the walk starts from
+                    val base = if (lastFrameUs.get() >= 0L) shownFrameIndex(opened) else opened.indexFor(from)
+                    val index = (base + steps).coerceIn(0, opened.lastIndex)
                     stepIndex = index
                     currentPositionMs = opened.positionMsFor(index)
                     val decoded = opened.frameAt(index, if (steps < 0) -1 else 1)
@@ -544,6 +568,7 @@ fun VideoPlayerView(
         if (exoPlayer.isScrubbingModeEnabled) exoPlayer.setScrubbingModeEnabled(false)
         leaveStepping(true)
         exoPlayer.play()
+        onFrameWalkChange(false)
     }
 
     val captureFrame: () -> Unit = {
@@ -564,8 +589,10 @@ fun VideoPlayerView(
                 videoItem = mediaItem,
                 // While stepping, the player is still parked where the walk began; the frame
                 // the user is looking at — and means to capture — is the stepped-to one.
+                // Otherwise it is the frame the player last drew, which the clock only
+                // approximates.
                 currentPositionMs = stepIndex?.let { frameCache?.positionMsFor(it) }
-                    ?: exoPlayer.currentPosition
+                    ?: shownPositionMs()
             ) { thumbnail ->
                 capturedThumb = thumbnail
                 captureCount++
@@ -672,12 +699,12 @@ fun VideoPlayerView(
 
         // Ghost control cluster.
         //
-        // Two rows, not three: the jog strip shares a row with the frame-step buttons and the
-        // shutter rather than sitting above them, because every dp this cluster is tall is a dp
-        // of picture it covers. The frame-hunting controls stay bunched at the right where a
-        // right thumb reaches, with the shutter in the corner itself; the jog strip takes the
-        // leftover width. A tap anywhere on the video is not bound to play/pause — that toggles
-        // the controls.
+        // Two rows and nothing above them: every dp this cluster is tall is a dp of picture it
+        // covers, and someone walking frames is looking at the picture. The file name lives in
+        // the host's top bar. The frame-hunting controls are one pill — jog strip with a step
+        // button on each end — sitting under the right thumb, the shutter in the corner beside
+        // it, and the two numbers worth knowing on the far left where no thumb is pressing. A
+        // tap anywhere on the video is not bound to play/pause — that toggles the controls.
         AnimatedVisibility(
             visible = controlsVisible,
             enter = fadeIn() + slideInVertically { it / 3 },
@@ -702,64 +729,57 @@ fun VideoPlayerView(
                 horizontalAlignment = Alignment.End,
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                // What this file is, and the two numbers worth knowing while stepping through
-                // it. The name yields first: it is the part that can be arbitrarily long, and
-                // the numbers are the reason the line is here at all.
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
-                    horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Text(
-                        text = mediaItem.displayName,
-                        color = GhostContentDim,
-                        fontSize = 10.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        style = GhostTextStyle,
-                        modifier = Modifier.weight(1f, fill = false)
-                    )
                     // Walking frame by frame, the frame number replaces the clip's summary and
                     // is shown brighter: it is the only way to tell "the next frame" from "the
                     // same frame, still decoding". It updates the instant the button is
                     // released, ahead of the picture.
                     val walkedIndex = stepIndex
                     val cacheForStats = frameCache
-                    val walkedLabel =
+                    val walking = walkedIndex != null && cacheForStats != null
+                    val readout: Pair<String, String>? =
                         if (walkedIndex != null && cacheForStats != null) {
                             // One-based: nobody counts the first frame as frame zero. The
                             // ellipsis means the number has moved and the picture has not yet.
                             val catchingUp = stepBitmapIndex != walkedIndex
-                            "frame ${walkedIndex + 1} / ${cacheForStats.frameCount}" +
+                            "frame" to "${walkedIndex + 1} / ${cacheForStats.frameCount}" +
                                 if (catchingUp) " …" else ""
                         } else {
-                            null
+                            formatClipStats(durationMs, frameRate, cacheForStats?.frameCount ?: 0)
                         }
-                    val walking = walkedLabel != null
-                    val stats = walkedLabel
-                        ?: formatClipStats(durationMs, frameRate, cacheForStats?.frameCount ?: 0)
-                    if (stats != null) {
-                        Text(
-                            text = stats,
-                            color = if (walking) GhostContent else GhostContentDim,
-                            fontSize = if (walking) 12.sp else 10.sp,
-                            maxLines = 1,
-                            softWrap = false,
-                            style = GhostTextStyle,
-                            modifier = Modifier.padding(start = 8.dp)
-                        )
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(start = 4.dp)
+                    ) {
+                        if (readout != null) {
+                            Text(
+                                text = readout.first,
+                                color = GhostContentDim,
+                                fontSize = 10.sp,
+                                maxLines = 1,
+                                softWrap = false,
+                                style = GhostTextStyle
+                            )
+                            Text(
+                                text = readout.second,
+                                color = if (walking) GhostContent else GhostContentDim,
+                                fontSize = if (walking) 13.sp else 10.sp,
+                                maxLines = 1,
+                                softWrap = false,
+                                style = GhostTextStyle
+                            )
+                        }
                     }
-                }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
                     // Precision scrub: distance = frames, regardless of how long the video is.
-                    // Given the leftover width, so it shrinks on a narrow phone instead of
-                    // pushing the buttons off the edge.
-                    FrameJogStrip(
+                    // Weighted rather than fixed, so it narrows on a small phone instead of
+                    // pushing the shutter off the edge.
+                    FrameJogBar(
                         onScrubStart = {
                             exoPlayer.pause()
                             beginStepping()
@@ -770,19 +790,11 @@ fun VideoPlayerView(
                             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                             stepFrames(frames)
                         },
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(36.dp)
-                    )
-                    GhostRepeatButton(
-                        icon = Icons.Rounded.SkipPrevious,
-                        contentDescription = "Previous frame",
-                        onStep = { beginStepping(); stepFrames(-1) }
-                    )
-                    GhostRepeatButton(
-                        icon = Icons.Rounded.SkipNext,
-                        contentDescription = "Next frame",
-                        onStep = { beginStepping(); stepFrames(1) }
+                        onStepButton = { direction ->
+                            beginStepping()
+                            stepFrames(direction)
+                        },
+                        modifier = Modifier.weight(JOG_BAR_WEIGHT)
                     )
                     // 1-tap frame capture, in the corner the right thumb rests on
                     GhostIconButton(
@@ -923,6 +935,9 @@ private const val SCRUBBING_IDLE_MS = 900L
 /** How long the user has to stop tapping before the player is parked under the still. */
 private const val PARK_IDLE_MS = 400L
 
+/** The jog bar's share of the frame row against the readout's 1: wide enough to drag along. */
+private const val JOG_BAR_WEIGHT = 2.4f
+
 /**
  * Hands the picture from the stepped-to still back to the player — but only once the player
  * has actually drawn a frame at or past where the walk ended.
@@ -1027,21 +1042,21 @@ private fun formatTime(ms: Long): String {
 }
 
 /**
- * "29.97 fps  ·  1,847 frames", or null when the decoder has not reported a frame rate.
+ * "29.97 fps" over "1,847 frames", or null when the decoder has not reported a frame rate.
  *
  * [exactFrameCount] comes from the container's own metadata and is preferred whenever it is
  * available. Failing that the count is duration x rate: exact for constant-rate footage, an
  * estimate for anything variable, which is the same assumption [frameStepPositionMs] makes when
  * it steps. Nothing is shown at all rather than a plausible-looking number from a default rate.
  */
-private fun formatClipStats(durationMs: Long, frameRate: Float, exactFrameCount: Int): String? {
+private fun formatClipStats(durationMs: Long, frameRate: Float, exactFrameCount: Int): Pair<String, String>? {
     if (frameRate <= 0f || durationMs <= 0L) return null
     val rate = if (abs(frameRate - frameRate.roundToInt()) < 0.01f) frameRate.roundToInt().toString()
     else String.format(Locale.US, "%.2f", frameRate)
     val frames =
         if (exactFrameCount > 0) exactFrameCount.toLong()
         else (durationMs / 1000.0 * frameRate).roundToLong()
-    return String.format(Locale.US, "%s fps  ·  %,d frames", rate, frames)
+    return "$rate fps" to String.format(Locale.US, "%,d frames", frames)
 }
 
 private fun findTextureView(viewGroup: ViewGroup): TextureView? {

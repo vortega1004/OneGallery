@@ -51,6 +51,18 @@ data class MediaItem(
         }
 }
 
+/**
+ * The tail of a file name, for places with no room for the whole thing: the last [length]
+ * characters before the extension, with an ellipsis when something was cut.
+ *
+ * The tail rather than the head because camera and export names share their beginning — the
+ * date, the device prefix — and differ at the end, in the time or the "(2)" of a copy.
+ */
+fun shortDisplayName(displayName: String, length: Int = 6): String {
+    val base = displayName.substringBeforeLast('.').ifEmpty { displayName }
+    return if (base.length <= length) base else "…" + base.takeLast(length)
+}
+
 data class Album(
     val id: String,
     val name: String,
