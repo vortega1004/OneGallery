@@ -145,12 +145,8 @@ class MediaStoreRepository(private val context: Context) {
      * next refresh, which the observer is already about to trigger.
      */
     fun queryMediaItems(bucketIdFilter: String? = null): List<MediaItem> {
-        val items = ArrayList<MediaItem>()
-        var afterId = -1L
-        while (true) {
-            val read = queryPage(afterId, bucketIdFilter, items)
-            if (read < PAGE_SIZE) break
-            afterId = items.last().id
+        val items = readInPages(PAGE_SIZE, MediaItem::id) { afterId ->
+            ArrayList<MediaItem>().also { queryPage(afterId, bucketIdFilter, it) }
         }
 
         // DATE_TAKEN is NULL for screenshots, downloads and many videos, so a SQL sort would push
@@ -166,8 +162,8 @@ class MediaStoreRepository(private val context: Context) {
         return items
     }
 
-    /** Appends up to [PAGE_SIZE] rows with `_id` above [afterId] to [into]; returns how many. */
-    private fun queryPage(afterId: Long, bucketIdFilter: String?, into: MutableList<MediaItem>): Int {
+    /** Appends up to [PAGE_SIZE] rows with `_id` above [afterId] to [into]. */
+    private fun queryPage(afterId: Long, bucketIdFilter: String?, into: MutableList<MediaItem>) {
         val selection = buildString {
             append("(")
             append("${MediaStore.Files.FileColumns.MEDIA_TYPE} = ${MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE}")
@@ -183,6 +179,11 @@ class MediaStoreRepository(private val context: Context) {
         val sortOrder = "${MediaStore.Files.FileColumns._ID} ASC"
         val queryUri = MediaStore.Files.getContentUri("external")
 
+        // The limit is what keeps a page inside one window. Android 11+ takes it as a query
+        // argument (verified on the API 37 image). Android 10 has no such argument; it is
+        // believed to accept `LIMIT` on the end of the sort order, which could not be verified
+        // here, so a refusal falls back to the unlimited query — the pre-paging behaviour,
+        // with its small chance of a torn read, rather than an empty gallery.
         val cursor = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             contentResolver.query(
                 queryUri,
@@ -196,11 +197,11 @@ class MediaStoreRepository(private val context: Context) {
                 null
             )
         } else {
-            // Android 10 has no limit argument but still accepts one on the end of the sort
-            contentResolver.query(queryUri, MEDIA_PROJECTION, selection, selectionArgs, "$sortOrder LIMIT $PAGE_SIZE")
+            runCatching {
+                contentResolver.query(queryUri, MEDIA_PROJECTION, selection, selectionArgs, "$sortOrder LIMIT $PAGE_SIZE")
+            }.getOrElse { contentResolver.query(queryUri, MEDIA_PROJECTION, selection, selectionArgs, sortOrder) }
         }
 
-        var read = 0
         cursor?.use {
             val idCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
             val dataCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DATA)
@@ -220,7 +221,6 @@ class MediaStoreRepository(private val context: Context) {
             val volumeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.VOLUME_NAME)
 
             while (cursor.moveToNext()) {
-                read++
                 val id = cursor.getLong(idCol)
                 val path = cursor.getString(dataCol) ?: ""
                 val displayName = cursor.getString(nameCol) ?: "Media_$id"
@@ -274,7 +274,6 @@ class MediaStoreRepository(private val context: Context) {
                 )
             }
         }
-        return read
     }
 
     /**
@@ -570,7 +569,7 @@ class MediaStoreRepository(private val context: Context) {
         const val PAGE_SIZE = 500
 
         /** How often every path is re-checked on disk, rather than only the new ones. */
-        const val FULL_SWEEP_INTERVAL_MS = 60_000L
+        const val FULL_SWEEP_INTERVAL_MS = 5 * 60_000L
 
         val MEDIA_PROJECTION = arrayOf(
             MediaStore.Files.FileColumns._ID,
@@ -606,4 +605,24 @@ class MediaStoreRepository(private val context: Context) {
         )
         val ISO_6709_PATTERN = Regex("""([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)""")
     }
+}
+
+/**
+ * Everything [page] can return, read in order: the first call asks for ids above -1, each next
+ * call for ids above the last one seen, until a page comes back short of [pageSize].
+ *
+ * A page that comes back *longer* than [pageSize] (a provider that ignored the limit) is taken
+ * whole; the next call then returns nothing and ends the loop, so a provider that cannot page
+ * costs one empty query rather than a wrong result.
+ */
+internal fun <T> readInPages(pageSize: Int, idOf: (T) -> Long, page: (afterId: Long) -> List<T>): MutableList<T> {
+    val all = ArrayList<T>()
+    var afterId = -1L
+    while (true) {
+        val read = page(afterId)
+        all.addAll(read)
+        if (read.size < pageSize) break
+        afterId = idOf(read.last())
+    }
+    return all
 }

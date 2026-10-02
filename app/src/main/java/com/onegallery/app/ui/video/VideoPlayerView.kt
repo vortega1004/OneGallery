@@ -71,6 +71,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -195,9 +196,10 @@ fun VideoPlayerView(
     // made it useless: during the fast walk it is meant to smooth, every tap killed the decode
     // that would have fed the tap after it, so each run boundary stalled anyway.
     var prefetchJob by remember(mediaItem.uri) { mutableStateOf<Job?>(null) }
-    // Steps taken while the cache is still opening, and where they count from. Opening is
-    // asynchronous, so without this the tap that triggers it moves the player *and* the open
-    // separately decides where the walk began — one tap, two moves, and they disagree.
+    // Steps taken while the cache is still opening. Opening is asynchronous, so without this
+    // the tap that triggers it would seek the player *and* the open would separately decide
+    // where the walk began — one tap, two moves, and they disagree. They count from the frame
+    // on screen, which does not move while the player is paused.
     var queuedSteps by remember(mediaItem.uri) { mutableIntStateOf(0) }
     // The frame the player was quietly moved to underneath the still, once the user stopped
     // tapping. When it matches the frame being left, pressing play needs no seek at all.
@@ -212,7 +214,6 @@ fun VideoPlayerView(
             }
         }
     }
-    var queuedFromMs by remember(mediaItem.uri) { mutableStateOf<Long?>(null) }
 
     // Where the next frame step counts from, or null to count from wherever the player is.
     //
@@ -467,7 +468,6 @@ fun VideoPlayerView(
         if (cache == null && !frameCacheOpened) {
             // The cache is on its way. Bank the step rather than seeking for it — the open will
             // apply it, and nothing else touches the position in the meantime.
-            if (queuedFromMs == null) queuedFromMs = exoPlayer.currentPosition
             queuedSteps += frames
         } else if (cache != null) {
             val from = stepIndex ?: shownFrameIndex(cache)
@@ -502,7 +502,7 @@ fun VideoPlayerView(
                 }
             }
         } else {
-            seekStepFrames(stepAnchorMs ?: exoPlayer.currentPosition, frames)
+            seekStepFrames(stepAnchorMs ?: shownPositionMs(), frames)
         }
     }
 
@@ -523,17 +523,12 @@ fun VideoPlayerView(
                     maxWidth = maxOf(playerSizePx.width, 1),
                     maxHeight = maxOf(playerSizePx.height, 1)
                 )
-                val from = queuedFromMs ?: exoPlayer.currentPosition
                 val steps = queuedSteps
-                queuedFromMs = null
                 queuedSteps = 0
                 frameCache = opened
                 frameCacheOpened = true
                 if (opened != null) {
-                    // The player has been paused since the first banked step, so the frame it
-                    // last drew is still the one the walk starts from
-                    val base = if (lastFrameUs.get() >= 0L) shownFrameIndex(opened) else opened.indexFor(from)
-                    val index = (base + steps).coerceIn(0, opened.lastIndex)
+                    val index = (shownFrameIndex(opened) + steps).coerceIn(0, opened.lastIndex)
                     stepIndex = index
                     currentPositionMs = opened.positionMsFor(index)
                     val decoded = opened.frameAt(index, if (steps < 0) -1 else 1)
@@ -546,7 +541,7 @@ fun VideoPlayerView(
                     }
                 } else if (steps != 0) {
                     // No frame-index access on this file: the banked steps are owed either way
-                    seekStepFrames(from, steps)
+                    seekStepFrames(shownPositionMs(), steps)
                 }
             }
         }
@@ -763,6 +758,7 @@ fun VideoPlayerView(
                                 fontSize = 10.sp,
                                 maxLines = 1,
                                 softWrap = false,
+                                overflow = TextOverflow.Ellipsis,
                                 style = GhostTextStyle
                             )
                             Text(
@@ -771,6 +767,7 @@ fun VideoPlayerView(
                                 fontSize = if (walking) 13.sp else 10.sp,
                                 maxLines = 1,
                                 softWrap = false,
+                                overflow = TextOverflow.Ellipsis,
                                 style = GhostTextStyle
                             )
                         }
@@ -841,6 +838,8 @@ fun VideoPlayerView(
                                 stepJob?.cancel()
                                 stepIndex = null
                                 parkedIndex = null
+                                // The walk is over, so the host's chrome may come back
+                                onFrameWalkChange(false)
                             }
                             // Same warm-codec path the fallback frame steps use: a drag is
                             // dozens of exact seeks in a row

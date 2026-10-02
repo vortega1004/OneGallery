@@ -178,6 +178,7 @@ crashes** on either. Anything the emulator's tiny library cannot exercise is cal
 | Drag that starts on a control | **VERIFIED on emulator** — a 500 px swipe beginning on the shutter, and one beginning on the next-frame button, left the pager where it was (the button press still counted); the same swipe on the picture paged to the next video and back |
 | Top bar during a frame walk | **VERIFIED on emulator** — pause alone keeps it; the first step takes it down; a tap on the picture (off) and another (on) brings it back; play brings it back |
 | File name chip | **VERIFIED on emulator** — reads `…_names` for the 150-character test name, `…lip_V3` for `clip_V3.mp4`; a tap on it shows the full name under the bar, a tap on the name hides it; five unit tests on the shortening rule |
+| Top bar after a seek-bar drag | **VERIFIED on emulator** (review fix) — step (bar down), drag the seek bar while paused: bar back; step again, press play: bar back |
 | Jog bar with buttons on its ends | **VERIFIED on emulator** — 360 px drag left on the strip went 150 → 159, the same drag right 159 → 150 (±9: 360 px less touch slop at 12 dp a frame on 480 dpi); the end buttons step and repeat as the old separate buttons did |
 | Albums-only start | **VERIFIED on emulator** — cold start lands on the album list; no bottom bar outside selection; back from an album returns to the list; the mixed selection bar still reads Move (2) / GIF (1) for a still plus a video, and the move itself landed on disk |
 | GIF creator tabs | **VERIFIED on emulator** — Frames / Playback / Crop / Size each show their tools with labels; the crop frame appears with the Crop tab and goes with it; the preview does not resize between tabs |
@@ -747,7 +748,7 @@ is cheap (§4), and since 2026-10-02 the library is read in id-keyed pages, whic
 10,589-item emulator library cut a refresh from ~1.5 s to ~145 ms (§1). The whole library is
 still held in memory on every change — that is by design for now (every screen derives from
 the one list) — and the on-disk check of each path runs only for paths not seen in the last
-minute. Not re-measured on the Pixel since either change.
+five minutes. Not re-measured on the Pixel since either change.
 
 ### 6.5 Every video page still builds its own ExoPlayer — LOW (was MEDIUM)
 
@@ -980,7 +981,17 @@ Not done: Delete and Favorite are still empty (§6.4); nothing here has run on t
 Test library on the AVD for this pass: the 25 photos and 3 clips from the first setup; `Clips`
 (three 12 s clips); `ManyVideos` (17 clips × 3 copies, 150-character names); `Bulk` (7,000
 tiny photos) and `BulkVid` (3,500 one-second videos), the last two only to reach two cursor
-windows. 50 unit tests pass (5 new, `ShortDisplayNameTest`).
+windows. 55 unit tests pass (10 new: `ShortDisplayNameTest`, `ReadInPagesTest`).
+
+**Review pass** (the `/code-review` recipe at high effort, eight findings, seven fixed): the
+Android 10 `LIMIT`-in-sort-order path now falls back to the unlimited query if the provider
+refuses it, instead of killing the observer flow; the no-cache fallback step and the banked
+steps start from the frame on screen like the cache path does, and `queuedFromMs` is gone;
+a seek-bar drag that ends a walk brings the top bar back; the readout and the name chip
+ellipsise instead of clipping on narrow screens; the paging loop is a pure function
+(`readInPages`) with five tests. Left as is: the full disk sweep still runs once per interval
+(now five minutes) on the refresh after it — it runs after the list is emitted, on the IO
+thread, and is bounded.
 
 ### 2026-10-02 — snapshots leave the video alone; moves into any folder
 

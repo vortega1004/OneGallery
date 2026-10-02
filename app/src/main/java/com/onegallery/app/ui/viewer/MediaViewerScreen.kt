@@ -74,6 +74,7 @@ import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.util.lerp
@@ -299,6 +300,8 @@ fun MediaViewerScreen(
                         // controls, where it sat under the thumb working them.
                         Box(
                             modifier = Modifier
+                                // Shrinks before it pushes the buttons on the right off the bar
+                                .weight(1f, fill = false)
                                 .padding(start = 12.dp)
                                 .heightIn(min = 36.dp)
                                 .background(Color(0x26FFFFFF), RoundedCornerShape(18.dp))
@@ -315,7 +318,8 @@ fun MediaViewerScreen(
                                 color = Color.White,
                                 fontSize = 12.sp,
                                 maxLines = 1,
-                                softWrap = false
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
