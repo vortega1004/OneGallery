@@ -1,6 +1,11 @@
 # OneGallery — Engineering Handoff
 
-**Last verified:** 2026-09-28 — files can be moved between albums in the app (grid
+**Last verified:** 2026-10-02 — a snapshot no longer restarts the video or flicks the viewer
+to a neighbour (the viewer follows items by id), and files can be moved into *any* folder once
+the user grants All files access. Both reproduced first on the emulator with generated clips,
+then fixed, then put through the regression pass in §9. Owner's rule: **never test on his
+phone** — reproduce with clips made or downloaded for the purpose.
+Before that, 2026-09-28 — files can be moved between albums in the app (grid
 multi-select and the viewer's ⋮ menu); rows left behind by another app's moves are repaired;
 and play after a frame walk no longer flashes the frame the walk began on. All three
 exercised on the `Pixel_9_Pro_XL` AVD — the flash as a before/after A/B, the moves verified on
@@ -17,7 +22,7 @@ that, the GIF frame count was capped at 250 (unit-tested only), and the GIF crea
 builds and 29 unit tests pass; GIF creation was exercised on the `Pixel_9_Pro_XL` AVD and
 then by hand on the device. The feature has had **no external review** — the `REVIEWER.md`
 round covered the video change only.
-**Status:** Debug and release builds pass, 43 unit tests pass per variant. Earlier work
+**Status:** Debug and release builds pass, 45 unit tests pass per variant. Earlier work
 was smoke-tested on the emulator and on a physical
 Pixel 10 Pro XL against a real 3,132-item library. Video frame capture works on real
 hardware. Two performance problems appear only at that scale (§6.15, §6.16). See §1 for
@@ -126,7 +131,7 @@ crashes** on either. Anything the emulator's tiny library cannot exercise is cal
 | Sorting (albums + media) | **VERIFIED on emulator** — all options present, orders correct, grid/viewer indices stay aligned after a re-sort, selection survives the viewer. "Date taken" vs "Date added" divergence **NOT verifiable on the emulator**: every test file has a null EXIF capture time, so `dateTaken` falls back to `dateAdded` and the two orders coincide by definition |
 | Thumbnail decoding | **VERIFIED firing** on emulator (fetch path instrumented and counted); **speedup only measurable on real photos** — emulator test images are 480×360, so there is nothing to save. Owner reports stutter "mostly gone" on the Pixel |
 | Launcher icon | **VERIFIED** — adaptive icon renders correctly under the launcher mask |
-| Automated tests | **43 JVM unit tests pass per variant** (`gradlew.bat test`): the previous 22 plus `GifDraftTest` (6) and `GifEncoderTest` (3). GIF tests cover ordered selection, loop sequences, frame editing, dimensions/timing, and independent ImageIO decoding including LZW dictionary resets and colour quantization. UI and MediaStore coverage remains manual |
+| Automated tests | **45 JVM unit tests pass per variant** (`gradlew.bat test`): the previous 22 plus `GifDraftTest` (6) and `GifEncoderTest` (3). GIF tests cover ordered selection, loop sequences, frame editing, dimensions/timing, and independent ImageIO decoding including LZW dictionary resets and colour quantization. UI and MediaStore coverage remains manual |
 | GIF image selection | **VERIFIED on emulator** — two endpoints + Select between selected four images in displayed order; long-press drag selected nine consecutive images; dragging toward the bottom edge scrolled and extended the selection to 18. Selection works in Pictures and is wired identically inside albums; the album-specific flow still needs a manual pass |
 | GIF editor and export | **VERIFIED on emulator** — duplicate inserted immediately after the active frame, removal restored the four-frame sequence; speed, rotation, square crop and boomerang saved successfully to `Pictures/OneGallery Gifs/`. Independent Pillow decoding: 405×405, six frames, 110 ms each, infinite loop, hashes in A B C D C B order. A nine-image 1080px-canvas export also completed. Reverse preview and pause exercised |
 | Frame stepping is off the seek path | **MEASURED on emulator, 4K clip with a 2 s GOP.** One tap, time until the picture changes, five trials each: the old seek path took 2.48 / 2.53 / 2.56 / 3.11 / 3.72 s; the new one had already changed by the first poll every time, and a poll costs ~0.85 s, so its latency is *below what this method can see* rather than measured. Same emulator, same clip, same taps |
@@ -137,6 +142,9 @@ crashes** on either. Anything the emulator's tiny library cannot exercise is cal
 | A tap that misses a video control does nothing | **VERIFIED on emulator** — six dead spots probed (the detail line, the gap between the two control rows, the far left of the playback row, between the frame-step buttons, between shutter and mute, above the jog strip) and the chrome stayed up for all six. Before the change the row gap hid it. Tapping the picture still toggles, and the top bar no longer toggles either |
 | Video controls still work under the tap swallow | **VERIFIED on emulator** — three consecutive bursts of ten rapid next-frame taps moved exactly +10, +10, +10 rendered frames; ten spaced taps +10; jog 336 px right then left went 283 → 275 → 283 (right still steps backward). A sideways swipe started inside the cluster still pages |
 | Clip detail line | **VERIFIED on emulator** — reads `framenum.mp4  30 fps · 600 frames`; `ffprobe` on the same file reports 30/1 and 600 frames. Long names are untested against a real camera roll: the name is the part that truncates, by construction |
+| Snapshot leaves the video alone | **VERIFIED on emulator, screen recordings.** Before: paused (or frame-walked) video, shutter → playback started on its own ~1.3 s later, in any list the snapshot lands in. After: paused on the same frame for the remaining 8 s of recording; first video in the list likewise; a snapshot taken while playing keeps playing without a hitch; swiping between two videos still autoplays each and pauses the other |
+| Which folders a move can reach | **MEASURED on emulator (Android 17, same as the owner's phone).** Without All files access MediaStore refused Download/, Documents/Scans/, a top-level MyStuff/, Music/Art/ and WhatsApp's Media folder ("Primary directory Download not allowed … allowed directories are [DCIM, Pictures]") and accepted Pictures/Screenshots and DCIM/Camera. With it, all seven took the move — photo and video — on disk, and **no consent dialog appeared** |
+| All files access from the picker | **VERIFIED on emulator.** Picker shows "Allow moving into any folder" only while some folder needs it; tapping it opens the per-app All files access page; granting it and pressing back re-reads the grant and opens every folder without reopening the picker |
 | Moving files between albums | **VERIFIED on emulator, on disk and in MediaStore.** Two photos and a video multi-selected → Move (3) → New album → system dialog "Allow OneGallery to modify 3 items?" → Allow: all three rows now `Pictures/<album>/`, the files physically in that folder and gone from the old ones, toast "Moved 3 items to …", selection cleared. From the viewer's ⋮ → Move to album, into a folder that already held a file of the same name: landed as `refview_sample_15 (1).jpg` beside it, toast says one was renamed, nothing overwritten. The picker greyed Movies ("Photos can't go in Movies/"), the storage root ("Can't move items here") and the source ("Already here"). **Not run:** media-management granted (no-dialog path), an SD card, a batch in the hundreds |
 | Play after a frame walk | **A/B on emulator, 4K clip.** Same script on both builds: walk 93 → 97, let the player park on 97, step back to 95, press play. Before: 95, then **93, 93** — the frame the walk started from — then playback. After: 95, then playback |
 | Rows whose files are gone | **VERIFIED on emulator.** A MediaStore row inserted for a path with no file appeared as its own album (5 albums / 28 items). On the next launch the app nominated it, the scanner deleted the row (gone from MediaStore, not just hidden), and Albums went back to 4 / 27. The owner's actual trigger — a bulk move in Google Photos — could not be reproduced here |
@@ -365,6 +373,11 @@ page toggles its chrome on tap, so the gaps between ghost buttons used to dismis
 the user was reaching for. It is the *press* that must be consumed — see §6a, this is not
 interchangeable with consuming the release.
 
+**The viewer identifies the item on screen by id** (`ViewerAnchor` in `MediaViewerScreen`), not
+by page number. A page settling moves it; a change to the list does not, and the pager is held on
+that item with `requestScrollToPage`. Which page may play, the top bar and the filmstrip all
+derive from it. See §6a for why page numbers are not safe.
+
 **Moving files** is a MediaStore `RELATIVE_PATH` update (`data/MediaMover.kt`), not
 copy-and-delete: MediaProvider renames the file on disk, the row keeps its id, and every app
 sees the new folder at once. Scoped storage lets an app modify only what it created, so each
@@ -372,8 +385,12 @@ batch first goes through `MediaStore.createWriteRequest` — one system dialog p
 launched from `GalleryApp`, which hosts the whole flow so the grid's multi-select and the
 viewer's ⋮ menu share it. The manifest declares `MANAGE_MEDIA`; if the user grants *Media
 management* in Settings (the picker links there), the same request is approved with no dialog.
-The picker checks MediaStore's folder rules up front (photos: DCIM, Pictures; videos: also
-Movies) so it can grey out a folder instead of accepting a move that will throw. Name clashes
+The picker checks MediaStore's folder rules up front so it can grey out a folder instead of
+accepting a move that will throw. For an ordinary app those rules are narrow — photos only under
+DCIM/ and Pictures/, videos also Movies/ (measured, §1) — so the manifest also declares
+`MANAGE_EXTERNAL_STORAGE`; once the user grants *All files access* every shared folder is open
+and the consent dialog is skipped. The picker offers the grant itself, only when some folder
+needs it, and re-reads it on resume. Name clashes
 become `name (1).ext`, case-insensitively, because shared storage is casefolded. Selection is
 therefore no longer GIF-only: every item is selectable and the GIF button takes the stills.
 
@@ -787,6 +804,16 @@ Changing either of these back will break things silently, with no error:
   `FilmStripHeight + ViewerActionRowHeight` from the page and hands the bar the same number.
   Change the filmstrip's thumbnail size or the action row's height without changing those
   constants and the picture silently sits over, or short of, the bar. (§4)
+- **Never identify the viewer's current item by page number.** Any MediaStore change can insert
+  items ahead of it — a snapshot does, every time — and for a frame every page number points one
+  item off. Anything keyed on the number then misfires: the video being watched counted as
+  inactive, paused, then active again, and activation autoplays. Use `ViewerAnchor.shownId`.
+  And re-anchor only when the *list* changes: re-anchoring whenever page and item disagree also
+  fires the instant a swipe ends and bounces the user back. (§4)
+- **A snapshot's DATE_TAKEN does not stick.** It is set on insert, then MediaStore re-reads the
+  published JPEG's EXIF, finds no date and writes NULL — so every snapshot sorts as newest, not
+  beside its video as the code intends. Harmless now that the viewer anchors by id; fixing it
+  means writing EXIF DateTimeOriginal into the JPEG. (§8)
 - **"The player has drawn a frame at or past the target" does not mean the seek landed.**
   The still is handed back when `VideoFrameMetadataListener` reports such a frame — but a walk
   that steps *back* from where the player was parked ends behind the frame the player last drew,
@@ -825,6 +852,32 @@ Changing either of these back will break things silently, with no error:
 ---
 
 ## 7. Changelog
+
+### 2026-10-02 — snapshots leave the video alone; moves into any folder
+
+Owner: *"There is a massive bug that starts playing the video after I take snapshot"*; the
+video *"disappears briefly and shows me the next video then the first video appears again in the
+film strip"* after walking frames toward the end and taking a snapshot, *"only in certain videos
+and folders"*; *"Why can I not move certain file to certain folders?"* And: *"You will not be
+testing on my phone."*
+
+**Snapshots.** Reproduced with generated clips: a paused or frame-walked video started playing
+~1.3 s after the shutter — the time it takes the snapshot to save and the library to re-query.
+Cause: the snapshot is inserted into the list the viewer shows, and the viewer identified the
+current item by page number; for a frame every number pointed one item off, so the video was
+"inactive", paused, then "active" again — and activation autoplays. The same frame drags the
+filmstrip and top bar toward a neighbour. Folders the snapshot never enters were unaffected:
+that is the "only certain folders". Fixed with `ViewerAnchor` (§4, §6a). The first version
+bounced swipes back; the regression pass caught it before it shipped.
+
+**Moves.** The picker's grey-outs were not a bug of their own — measured on the emulator, MediaStore
+itself refuses photos anywhere but DCIM/ and Pictures/ for an ordinary app. The fix is All files
+access: declared, offered from the picker where it would help, and with it every folder took
+the move and the consent dialog disappeared. Failures now say why, in MediaStore's own words.
+
+The visual glitch exactly as described (the strip showing *another video* for a moment) was not
+captured on camera here; its cause — page numbers shifting under the viewer — is what was fixed,
+and the recordings show the strip holding steady through the same insertion.
 
 ### 2026-09-28 — move files in the app; phantom files; no flash after a walk
 
@@ -1279,6 +1332,8 @@ Roughly dependency-ordered. Good first tasks are marked ★.
    decode — seen on the emulator as `frame 101 / 240 …` sitting over frame 103 for a couple of
    seconds. A forward burst could decode the whole span in runs instead of only its endpoint.
    Measure on the Pixel first; hardware decode may make this invisible.
+1d. **Date snapshots properly.** Write EXIF DateTimeOriginal (video date + position) into the
+   JPEG so MediaStore keeps it; today every snapshot sorts as the newest item (§6a).
 1c. **Delete and Share on the multi-select bar.** Selection is general now, so both are small:
    `createTrashRequest` and an `ACTION_SEND_MULTIPLE` intent, beside Move.
 2. **Chase the residual filmstrip stutter** (§6.15) *only if it still bothers you*. Decoding is
@@ -1303,6 +1358,25 @@ Roughly dependency-ordered. Good first tasks are marked ★.
 ---
 
 ## 9. Conventions for AI coding agents
+
+### Regression pass — run it before handing a build over
+
+The 2026-09-28 build shipped two regressions because each change was tested alone and the
+core flows were never re-run. These are scripted against the emulator with generated clips
+(burned-in frame numbers, `PXL_*` names, real capture dates in `DCIM/Camera`); none of them
+touch the owner's phone.
+
+1. Open a video, pause, walk frames near the end, press the shutter → stays paused on that frame.
+2. Same while playing → keeps playing, no hitch.
+3. Swipe from one video to the next and back → each autoplays, the other pauses.
+4. Walk frames, step back, press play → no flash of the frame the walk began on.
+5. Move a photo into Pictures/… without All files access → one consent dialog, file moved on disk.
+6. Move into Download/ with All files access → no dialog, file moved on disk.
+7. Multi-select stills + a video → Move counts all, GIF counts the stills.
+
+Record the screen (`screenrecord` to `/data/local/tmp`, *not* shared storage — a recording saved
+there is indexed as a video and pollutes the library) and read the frames, rather than trusting
+a single screenshot.
 
 ### Start here
 

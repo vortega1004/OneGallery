@@ -29,6 +29,20 @@ class MediaMoverRulesTest {
         assertTrue(destinationAllows(MediaType.IMAGE, "dcim/"))
     }
 
+    @Test fun `with All files access any shared folder is open`() {
+        assertTrue(destinationAllows(MediaType.IMAGE, "Download/", anyFolder = true))
+        assertTrue(destinationAllows(MediaType.IMAGE, "Documents/Scans/", anyFolder = true))
+        assertTrue(destinationAllows(MediaType.IMAGE, "MyStuff/", anyFolder = true))
+        assertTrue(destinationAllows(MediaType.VIDEO, "Music/Art/", anyFolder = true))
+        assertTrue(destinationAllows(MediaType.IMAGE, "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images/", anyFolder = true))
+    }
+
+    @Test fun `some places stay closed even with All files access`() {
+        assertFalse(destinationAllows(MediaType.IMAGE, "/", anyFolder = true))
+        assertFalse(destinationAllows(MediaType.IMAGE, "Android/data/com.example/", anyFolder = true))
+        assertFalse(destinationAllows(MediaType.IMAGE, "Android/obb/com.example/", anyFolder = true))
+    }
+
     @Test fun `relative paths take MediaStore's own form`() {
         assertEquals("DCIM/Camera/", normalizeRelativePath("DCIM/Camera"))
         assertEquals("DCIM/Camera/", normalizeRelativePath("/DCIM/Camera/"))

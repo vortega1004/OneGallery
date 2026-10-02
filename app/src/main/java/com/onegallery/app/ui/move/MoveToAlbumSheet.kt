@@ -2,7 +2,6 @@ package com.onegallery.app.ui.move
 
 import android.content.Intent
 import android.net.Uri
-import android.os.Build
 import android.provider.MediaStore
 import android.provider.Settings
 import androidx.compose.foundation.background
@@ -47,7 +46,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.onegallery.app.data.MoveDestination
+import com.onegallery.app.data.canMoveAnywhere
 import com.onegallery.app.data.destinationAllows
 import com.onegallery.app.data.newAlbumPath
 import com.onegallery.app.data.normalizeRelativePath
@@ -81,6 +82,16 @@ fun MoveToAlbumSheet(
     // Most recently added-to first: the folders someone is actively sorting into
     val ordered = remember(albums) { albums.sortedByDescending { it.newestDate } }
     val volume = items.firstOrNull()?.volumeName.orEmpty()
+    // Re-read on every resume: the user grants it in Settings and comes straight back here
+    var anyFolder by remember { mutableStateOf(canMoveAnywhere()) }
+    LifecycleResumeEffect(Unit) {
+        anyFolder = canMoveAnywhere()
+        onPauseOrDispose { }
+    }
+    val someNeedAccess = !anyFolder && ordered.any { album ->
+        blockedReason(items, album, anyFolder = false) != null &&
+            blockedReason(items, album, anyFolder = true) == null
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -96,6 +107,7 @@ fun MoveToAlbumSheet(
                 modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp)
             )
             LazyColumn(Modifier.heightIn(max = 520.dp)) {
+                if (someNeedAccess) item { AllFilesAccessRow() }
                 item {
                     DestinationRow(
                         title = "New album",
@@ -114,7 +126,7 @@ fun MoveToAlbumSheet(
                     )
                 }
                 items(ordered, key = { it.id }) { album ->
-                    val blocked = blockedReason(items, album)
+                    val blocked = blockedReason(items, album, anyFolder)
                     DestinationRow(
                         title = album.name,
                         subtitle = blocked ?: "${album.count} · ${album.relativePath.trimEnd('/')}",
@@ -132,7 +144,6 @@ fun MoveToAlbumSheet(
                         }
                     )
                 }
-                item { MediaManagementHint() }
             }
         }
     }
@@ -154,20 +165,16 @@ fun MoveToAlbumSheet(
  * Blocked only when *nothing* could move: a mixed batch where some items are already there, or
  * one video among photos headed for Movies/, still goes — the move reports what it skipped.
  */
-private fun blockedReason(items: List<MediaItem>, album: Album): String? {
+private fun blockedReason(items: List<MediaItem>, album: Album, anyFolder: Boolean): String? {
     // The storage root ("/" in MediaStore) is not a place media may live
     if (normalizeRelativePath(album.relativePath).isEmpty()) return "Can't move items here"
     if (items.all { it.bucketId == album.id }) return "Already here"
     val candidates = items.filter { it.bucketId != album.id }
     if (candidates.none { it.volumeName == album.volumeName }) return "On a different storage"
-    if (candidates.none { destinationAllows(it.mediaType, album.relativePath) }) {
-        val folder = album.relativePath.substringBefore('/')
-        val what = when {
-            candidates.all { it.mediaType == MediaType.VIDEO } -> "Videos"
-            candidates.none { it.mediaType == MediaType.VIDEO } -> "Photos"
-            else -> "These items"
-        }
-        return "$what can't go in $folder/"
+    if (candidates.none { destinationAllows(it.mediaType, album.relativePath, anyFolder) }) {
+        // With access granted the only closed folders are ones nothing can enter
+        if (anyFolder) return "Can't move items here"
+        return "Needs All files access — see above"
     }
     return null
 }
@@ -235,29 +242,38 @@ private fun NewAlbumDialog(onDismiss: () -> Unit, onCreate: (name: String, path:
 }
 
 /**
- * Offers the one-time grant that removes the system's confirmation dialog from every move.
+ * Asks for *All files access*, shown only when some folder in the list is closed without it.
  *
- * Shown only where it applies — Android 12 and later, and not already granted — because the
- * dialog is otherwise the price of every single move, and the setting is buried where nobody
- * would find it unprompted.
+ * Android lets an ordinary app put photos only in DCIM/ and Pictures/ — Download, Documents,
+ * WhatsApp's folders and anything at the top of storage are refused outright. The grant opens
+ * all of them and also removes the per-move confirmation; without it this row is the only
+ * explanation of why half the folders are greyed out.
  */
 @Composable
-private fun MediaManagementHint() {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+private fun AllFilesAccessRow() {
     val context = LocalContext.current
-    if (MediaStore.canManageMedia(context)) return
-    TextButton(
-        onClick = {
-            context.startActivity(
-                Intent(Settings.ACTION_REQUEST_MANAGE_MEDIA, Uri.parse("package:${context.packageName}"))
-            )
-        },
-        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable {
+                context.startActivity(
+                    Intent(
+                        Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                        Uri.parse("package:${context.packageName}")
+                    )
+                )
+            }
+            .padding(horizontal = 24.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(
-            "Skip the confirmation on future moves",
-            color = Color(0xFF8AB4F8),
-            fontSize = 13.sp
-        )
+        Column(Modifier.weight(1f)) {
+            Text("Allow moving into any folder", color = Color(0xFF8AB4F8), fontSize = 15.sp)
+            Text(
+                "Android only lets apps move photos into DCIM and Pictures until you turn on " +
+                    "All files access for OneGallery. Also skips the confirmation on every move.",
+                color = DarkTextSecondary,
+                fontSize = 12.sp
+            )
+        }
     }
 }

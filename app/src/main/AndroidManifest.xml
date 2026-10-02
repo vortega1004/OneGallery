@@ -15,6 +15,14 @@
         android:name="android.permission.MANAGE_MEDIA"
         tools:ignore="ProtectedPermissions" />
 
+    <!-- Moving into any folder. Without it MediaStore confines photos to DCIM/ and Pictures/
+         (videos also Movies/) and refuses Download/, Documents/, WhatsApp's folders and any
+         folder at the top of storage — measured on Android 17, it is not a guess. Granted once
+         by the user under Settings → Special app access → All files access. -->
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+
     <!-- Legacy storage permission for Android <= 12 -->
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"

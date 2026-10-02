@@ -63,6 +63,7 @@ import com.onegallery.app.domain.forAlbum
 import com.onegallery.app.domain.sortedBy
 import com.onegallery.app.data.MoveDestination
 import com.onegallery.app.data.MoveResult
+import com.onegallery.app.data.canMoveAnywhere
 import com.onegallery.app.domain.MediaItem
 import com.onegallery.app.domain.toAlbums
 import com.onegallery.app.ui.grid.GalleryGridScreen
@@ -281,13 +282,21 @@ fun GalleryApp(viewModel: GalleryViewModel) {
             albums = remember(mediaItems) { mediaItems.toAlbums() },
             onMove = { destination ->
                 moveIds = null
-                awaitingConsent = moveItems to destination
-                // One dialog for the whole batch; approved silently where the user has granted
-                // media management
-                consent.launch(
-                    IntentSenderRequest.Builder(viewModel.mover.writeRequest(moveItems).intentSender)
-                        .build()
-                )
+                if (canMoveAnywhere()) {
+                    // All files access: nothing to confirm (measured — no dialog appears)
+                    viewModel.move(moveItems, destination) { outcome ->
+                        Toast.makeText(context, describeMove(outcome, destination), Toast.LENGTH_LONG).show()
+                        selectionMode = false
+                        selectedImageIds = longArrayOf()
+                    }
+                } else {
+                    // One system dialog for the whole batch
+                    awaitingConsent = moveItems to destination
+                    consent.launch(
+                        IntentSenderRequest.Builder(viewModel.mover.writeRequest(moveItems).intentSender)
+                            .build()
+                    )
+                }
             },
             onDismiss = { moveIds = null }
         )
@@ -396,12 +405,13 @@ private fun describeMove(result: MoveResult, destination: MoveDestination): Stri
         if (result.alreadyThere > 0) add("${result.alreadyThere} already there")
         if (result.failed > 0) add("${result.failed} couldn't be moved")
     }
+    val why = result.firstFailure?.let { " — $it" }.orEmpty()
     val head = when (result.moved) {
         0 -> "Nothing moved to ${destination.label}"
         1 -> "Moved 1 item to ${destination.label}"
         else -> "Moved ${result.moved} items to ${destination.label}"
     }
-    return (listOf(head) + notes).joinToString(" · ")
+    return (listOf(head) + notes).joinToString(" · ") + why
 }
 
 private const val VIEWER_ENTER_MS = 220

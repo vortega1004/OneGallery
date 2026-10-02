@@ -3,6 +3,7 @@ package com.onegallery.app.data
 import android.app.PendingIntent
 import android.content.ContentValues
 import android.content.Context
+import android.os.Environment
 import android.provider.MediaStore
 import com.onegallery.app.domain.MediaItem
 import com.onegallery.app.domain.MediaType
@@ -25,8 +26,19 @@ data class MoveResult(
     /** Already in the destination; nothing to do. */
     val alreadyThere: Int,
     /** Refused by MediaStore or by the rules below — see [MediaMover.move]. */
-    val failed: Int
+    val failed: Int,
+    /** Why the first refusal happened, in MediaStore's own words, so a failure is never silent. */
+    val firstFailure: String? = null
 )
+
+/**
+ * Whether the user has granted *All files access* — with it, any folder is a destination and no
+ * per-batch confirmation is needed. Both measured on the emulator (Android 17): without it
+ * MediaStore refuses Download/, Documents/, Music/, WhatsApp's folders and any top-level folder
+ * ("Primary directory Download not allowed … allowed directories are [DCIM, Pictures]"); with it
+ * all of them took the move and no consent dialog appeared.
+ */
+fun canMoveAnywhere(): Boolean = Environment.isExternalStorageManager()
 
 /**
  * Moves media between folders by rewriting MediaStore's `RELATIVE_PATH`.
@@ -59,6 +71,7 @@ class MediaMover(context: Context) {
     suspend fun move(items: List<MediaItem>, destination: MoveDestination): MoveResult =
         withContext(Dispatchers.IO) {
             val target = normalizeRelativePath(destination.relativePath)
+            val anyFolder = canMoveAnywhere()
             // Names already in the destination, so a clash becomes "name (1).jpg" rather than a
             // refused update. Case-insensitive: shared storage is casefolded on current Android,
             // so "IMG.JPG" and "img.jpg" are the same file there.
@@ -68,6 +81,7 @@ class MediaMover(context: Context) {
             var renamed = 0
             var alreadyThere = 0
             var failed = 0
+            var firstFailure: String? = null
             for (item in items) {
                 if (normalizeRelativePath(item.relativePath).equals(target, ignoreCase = true) &&
                     item.volumeName == destination.volumeName
@@ -75,10 +89,14 @@ class MediaMover(context: Context) {
                     alreadyThere++
                     continue
                 }
-                if (item.volumeName != destination.volumeName ||
-                    !destinationAllows(item.mediaType, target)
-                ) {
+                if (item.volumeName != destination.volumeName) {
                     failed++
+                    firstFailure = firstFailure ?: "${item.displayName} is on a different storage"
+                    continue
+                }
+                if (!destinationAllows(item.mediaType, target, anyFolder)) {
+                    failed++
+                    firstFailure = firstFailure ?: "${item.displayName} can't go in ${target.trimEnd('/')}"
                     continue
                 }
                 val name = uniqueName(item.displayName, taken)
@@ -86,8 +104,12 @@ class MediaMover(context: Context) {
                     put(MediaStore.MediaColumns.RELATIVE_PATH, target)
                     if (name != item.displayName) put(MediaStore.MediaColumns.DISPLAY_NAME, name)
                 }
-                val ok = runCatching { resolver.update(item.uri, values, null, null) == 1 }
-                    .getOrDefault(false)
+                val outcome = runCatching { resolver.update(item.uri, values, null, null) == 1 }
+                val ok = outcome.getOrDefault(false)
+                if (!ok) {
+                    firstFailure = firstFailure ?: (outcome.exceptionOrNull()?.message
+                        ?: "MediaStore did not update ${item.displayName}")
+                }
                 if (ok) {
                     moved++
                     if (name != item.displayName) renamed++
@@ -96,7 +118,7 @@ class MediaMover(context: Context) {
                     failed++
                 }
             }
-            MoveResult(moved, renamed, alreadyThere, failed)
+            MoveResult(moved, renamed, alreadyThere, failed, firstFailure)
         }
 
     private fun namesIn(relativePath: String, volumeName: String): Set<String> {
@@ -117,14 +139,27 @@ class MediaMover(context: Context) {
 }
 
 /**
- * MediaStore's own rule for which top-level folders a type may live under.
+ * Whether MediaStore will accept [mediaType] at [relativePath].
  *
- * MediaProvider refuses a `RELATIVE_PATH` outside these — a photo cannot be moved into Movies/,
- * a video cannot go into Music/ — and says so only by throwing. Checking first lets the album
- * picker grey those folders out instead of accepting a move that is certain to fail.
+ * For an ordinary app MediaProvider confines photos to DCIM/ and Pictures/ (videos also Movies/)
+ * and refuses anything else by throwing — measured on Android 17, not assumed. With All files
+ * access ([anyFolder]) every shared folder is open; only the storage root and the app-private
+ * Android/data and Android/obb trees stay off-limits. Checking first lets the album picker say
+ * why a folder is closed instead of accepting a move that is certain to fail.
  */
-internal fun destinationAllows(mediaType: MediaType, relativePath: String): Boolean {
-    val primary = normalizeRelativePath(relativePath).substringBefore('/')
+internal fun destinationAllows(
+    mediaType: MediaType,
+    relativePath: String,
+    anyFolder: Boolean = false
+): Boolean {
+    val normalized = normalizeRelativePath(relativePath)
+    if (normalized.isEmpty()) return false
+    val primary = normalized.substringBefore('/')
+    if (anyFolder) {
+        val androidPrivate = primary.equals("Android", ignoreCase = true) &&
+            normalized.substringAfter('/').substringBefore('/').lowercase() in setOf("data", "obb")
+        return !androidPrivate
+    }
     val allowed = if (mediaType == MediaType.VIDEO) VIDEO_PRIMARY_DIRS else IMAGE_PRIMARY_DIRS
     return allowed.any { it.equals(primary, ignoreCase = true) }
 }
