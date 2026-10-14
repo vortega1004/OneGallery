@@ -16,11 +16,12 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -34,7 +35,6 @@ import androidx.compose.material.icons.automirrored.rounded.RotateLeft
 import androidx.compose.material.icons.automirrored.rounded.RotateRight
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
-import androidx.compose.material.icons.rounded.Crop
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -56,18 +56,23 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
@@ -88,7 +93,12 @@ fun GifCreatorScreen(model: GifCreatorViewModel, onClose: () -> Unit) {
     val draft = model.draft ?: return
     val context = LocalContext.current
     var playing by remember { mutableStateOf(false) }
-    var cropping by remember { mutableStateOf(false) }
+    // One group of tools on screen at a time. Everything used to share a single panel, where
+    // the arrows that reorder a frame sat directly above the arrows that set the loop direction
+    // and the speed slider, and were easy to take for one another.
+    var tool by rememberSaveable { mutableStateOf(GifTool.FRAMES) }
+    // The crop frame is up exactly while its tab is, and steps aside for the preview playing
+    val cropping = tool == GifTool.CROP && !playing
     var previewIndex by remember { mutableIntStateOf(draft.activeIndex) }
     var previewError by remember { mutableStateOf(false) }
     val busy = model.loading || model.saving
@@ -159,18 +169,28 @@ fun GifCreatorScreen(model: GifCreatorViewModel, onClose: () -> Unit) {
         }
     }
     val tools: @Composable (Modifier) -> Unit = { modifier ->
-        Column(modifier.verticalScroll(rememberScrollState()).padding(horizontal = 12.dp),
-            horizontalAlignment = Alignment.CenterHorizontally) {
+        Column(modifier.padding(horizontal = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             val strip = rememberLazyListState()
             LaunchedEffect(displayedIndex) {
                 if (strip.layoutInfo.visibleItemsInfo.none { it.index == displayedIndex }) {
                     strip.scrollToItem(displayedIndex)
                 }
             }
-            Text("${displayedIndex + 1} / ${draft.frames.size} frames · ${String.format(Locale.US, "%.2f", draft.durationMs / 1000f)} s / loop",
-                color = Color.LightGray)
+            // Always on screen, whichever tab is open: play, and where in the GIF you are
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                GifButton(if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                    if (playing) "Pause preview" else "Play preview", !busy && !previewError) {
+                    if (playing) stop() else {
+                        cyclePosition = 0
+                        previewIndex = draft.order.first()
+                        playing = true
+                    }
+                }
+                Text("${displayedIndex + 1} / ${draft.frames.size} frames · ${String.format(Locale.US, "%.2f", draft.durationMs / 1000f)} s / loop",
+                    color = Color.LightGray, modifier = Modifier.weight(1f))
+            }
             LazyRow(state = strip, horizontalArrangement = Arrangement.spacedBy(6.dp),
-                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                 itemsIndexed(draft.frames, key = { _, f -> f.key }) { index, f ->
                     Column(horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier.width(62.dp).border(if (index == displayedIndex) 2.dp else 0.dp,
@@ -185,81 +205,81 @@ fun GifCreatorScreen(model: GifCreatorViewModel, onClose: () -> Unit) {
                     }
                 }
             }
-            Row(horizontalArrangement = Arrangement.Center) {
-                GifButton(Icons.AutoMirrored.Rounded.ArrowBack, "Move frame earlier", !busy && displayedIndex > 0) {
-                    stop(); model.update { it.moveActive(-1) }
-                }
-                GifButton(Icons.Rounded.ContentCopy, "Duplicate frame in place",
-                    !busy && draft.frames.size < MAX_GIF_FRAMES) { stop(); model.duplicate() }
-                GifButton(Icons.Rounded.DeleteOutline, "Remove frame from GIF", !busy && draft.frames.size > 2) { stop(); model.remove() }
-                GifButton(Icons.AutoMirrored.Rounded.ArrowForward, "Move frame later", !busy && displayedIndex < draft.frames.lastIndex) {
-                    stop(); model.update { it.moveActive(1) }
-                }
-            }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                GifButton(if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                    if (playing) "Pause preview" else "Play preview", !busy && !previewError) {
-                    if (playing) stop() else {
-                        cropping = false
-                        cyclePosition = 0
-                        previewIndex = draft.order.first()
-                        playing = true
+            GifToolTabs(tool) { tool = it }
+            Column(Modifier.fillMaxWidth().weight(1f, fill = false).verticalScroll(rememberScrollState())
+                .padding(vertical = 10.dp), horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                when (tool) {
+                    GifTool.FRAMES -> {
+                        Text("Frame ${displayedIndex + 1} — reorder, copy or remove it", color = Color.LightGray)
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                            GifToolButton(Icons.AutoMirrored.Rounded.ArrowBack, "Move earlier", "Move frame earlier",
+                                !busy && displayedIndex > 0) { stop(); model.update { it.moveActive(-1) } }
+                            GifToolButton(Icons.Rounded.ContentCopy, "Duplicate", "Duplicate frame in place",
+                                !busy && draft.frames.size < MAX_GIF_FRAMES) { stop(); model.duplicate() }
+                            GifToolButton(Icons.Rounded.DeleteOutline, "Remove", "Remove frame from GIF",
+                                !busy && draft.frames.size > 2) { stop(); model.remove() }
+                            GifToolButton(Icons.AutoMirrored.Rounded.ArrowForward, "Move later", "Move frame later",
+                                !busy && displayedIndex < draft.frames.lastIndex) { stop(); model.update { it.moveActive(1) } }
+                        }
                     }
-                }
-                listOf(GifLoop.FORWARD to Icons.AutoMirrored.Rounded.ArrowForward,
-                    GifLoop.REVERSE to Icons.AutoMirrored.Rounded.ArrowBack,
-                    GifLoop.BOOMERANG to Icons.Rounded.Sync).forEach { (loop, icon) ->
-                    GifButton(icon, when (loop) {
-                        GifLoop.FORWARD -> "Forward loop"
-                        GifLoop.REVERSE -> "Reverse loop"
-                        GifLoop.BOOMERANG -> "Boomerang loop"
-                    }, !busy, draft.loop == loop) {
-                        stop(); model.update { it.copy(loop = loop) }
-                    }
-                }
-            }
-            Text("Speed · ${String.format(Locale.US, "%.1f", 100f / draft.delayCentiseconds)} fps · ${draft.delayCentiseconds * 10} ms/frame",
-                color = Color.White)
-            Slider(value = 100f / draft.delayCentiseconds,
-                onValueChange = { speed -> model.update { it.copy(delayCentiseconds = (100f / speed).roundToInt()) } },
-                valueRange = 1f..25f, steps = 23, enabled = !busy,
-                modifier = Modifier.semantics { contentDescription = "Playback speed" })
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                GifButton(Icons.AutoMirrored.Rounded.RotateLeft, "Rotate GIF left", !busy) {
-                    stop(); model.update { it.copy(edit = it.edit.rotateCounterClockwise()) }
-                }
-                GifButton(Icons.AutoMirrored.Rounded.RotateRight, "Rotate GIF right", !busy) {
-                    stop(); model.update { it.copy(edit = it.edit.rotateClockwise()) }
-                }
-                GifButton(Icons.Rounded.Crop, "Crop entire GIF", !busy, cropping) { stop(); cropping = !cropping }
-                GifButton(Icons.Rounded.RestartAlt, "Reset crop and rotation", !busy) {
-                    stop(); model.update { it.copy(edit = PhotoEditState()) }
-                }
-            }
-            if (cropping) {
-                Text("Drag corners or move the crop · applies to every frame", color = Color.LightGray)
-                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("Full" to 0f, "1:1" to 1f, "4:3" to 4f / 3, "16:9" to 16f / 9, "9:16" to 9f / 16).forEach { (name, ratio) ->
-                        TextButton(enabled = !busy, onClick = {
-                            model.update {
-                                val aspect = if (it.edit.swapsDimensions) 1f / it.canvasAspect else it.canvasAspect
-                                it.copy(edit = it.edit.copy(crop = NormalizedRect.centered(ratio, aspect)))
+                    GifTool.PLAYBACK -> {
+                        Text("Speed · ${String.format(Locale.US, "%.1f", 100f / draft.delayCentiseconds)} fps · ${draft.delayCentiseconds * 10} ms/frame",
+                            color = Color.White)
+                        Slider(value = 100f / draft.delayCentiseconds,
+                            onValueChange = { speed -> model.update { it.copy(delayCentiseconds = (100f / speed).roundToInt()) } },
+                            valueRange = 1f..25f, steps = 23, enabled = !busy,
+                            modifier = Modifier.semantics { contentDescription = "Playback speed" })
+                        Text("Direction", color = Color.LightGray)
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                            listOf(Triple(GifLoop.FORWARD, Icons.AutoMirrored.Rounded.ArrowForward, "Forward"),
+                                Triple(GifLoop.REVERSE, Icons.AutoMirrored.Rounded.ArrowBack, "Reverse"),
+                                Triple(GifLoop.BOOMERANG, Icons.Rounded.Sync, "Boomerang")).forEach { (loop, icon, name) ->
+                                GifToolButton(icon, name, "$name loop", !busy, draft.loop == loop) {
+                                    stop(); model.update { it.copy(loop = loop) }
+                                }
                             }
-                        }) { Text(name) }
+                        }
                     }
-                    TextButton(onClick = { cropping = false }) { Text("Done") }
+                    GifTool.CROP -> {
+                        Text("Drag corners or move the crop · applies to every frame", color = Color.LightGray)
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf("Full" to 0f, "1:1" to 1f, "4:3" to 4f / 3, "16:9" to 16f / 9, "9:16" to 9f / 16).forEach { (name, ratio) ->
+                                TextButton(enabled = !busy, onClick = {
+                                    stop()
+                                    model.update {
+                                        val aspect = if (it.edit.swapsDimensions) 1f / it.canvasAspect else it.canvasAspect
+                                        it.copy(edit = it.edit.copy(crop = NormalizedRect.centered(ratio, aspect)))
+                                    }
+                                }) { Text(name) }
+                            }
+                        }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                            GifToolButton(Icons.AutoMirrored.Rounded.RotateLeft, "Rotate left", "Rotate GIF left", !busy) {
+                                stop(); model.update { it.copy(edit = it.edit.rotateCounterClockwise()) }
+                            }
+                            GifToolButton(Icons.AutoMirrored.Rounded.RotateRight, "Rotate right", "Rotate GIF right", !busy) {
+                                stop(); model.update { it.copy(edit = it.edit.rotateClockwise()) }
+                            }
+                            GifToolButton(Icons.Rounded.RestartAlt, "Reset", "Reset crop and rotation", !busy) {
+                                stop(); model.update { it.copy(edit = PhotoEditState()) }
+                            }
+                        }
+                    }
+                    GifTool.SIZE -> {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text("Canvas", color = Color.White)
+                            listOf(480, 720, 1080).forEach { edge ->
+                                FilterChip(draft.longEdge == edge, { model.update { it.copy(longEdge = edge) } },
+                                    label = { Text("${edge}px") }, enabled = !busy)
+                            }
+                        }
+                        val (width, height) = draft.outputSize
+                        Text("Output: $width × $height", color = Color.LightGray)
+                        Text("Saves to ${GifRenderer.FOLDER}", color = Color.LightGray)
+                    }
                 }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("Canvas", color = Color.White)
-                listOf(480, 720, 1080).forEach { edge ->
-                    FilterChip(draft.longEdge == edge, { model.update { it.copy(longEdge = edge) } },
-                        label = { Text("${edge}px") }, enabled = !busy)
-                }
-            }
-            val (width, height) = draft.outputSize
-            Text("Output: $width × $height", color = Color.LightGray)
-            Text("Saves to ${GifRenderer.FOLDER}", color = Color.LightGray, modifier = Modifier.padding(bottom = 8.dp))
         }
     }
 
@@ -267,11 +287,12 @@ fun GifCreatorScreen(model: GifCreatorViewModel, onClose: () -> Unit) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             GifButton(Icons.Rounded.Close, "Close GIF creator", !model.saving, onClick = onClose)
             Text("Create GIF", color = Color.White, modifier = Modifier.weight(1f))
-            TextButton(enabled = !busy && !previewError, onClick = { stop(); cropping = false; model.save() }) { Text("Save") }
+            TextButton(enabled = !busy && !previewError, onClick = { stop(); model.save() }) { Text("Save") }
         }
         BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
             val toolWidth = minOf(380.dp, maxWidth / 2)
-            val toolHeight = maxHeight * 0.60f
+            // Fixed, so switching tabs never resizes the preview above it
+            val toolHeight = minOf(maxHeight * 0.50f, 336.dp)
             if (maxWidth > maxHeight) {
                 Row(Modifier.fillMaxSize()) {
                     preview(Modifier.weight(1f).fillMaxSize())
@@ -280,7 +301,7 @@ fun GifCreatorScreen(model: GifCreatorViewModel, onClose: () -> Unit) {
             } else {
                 Column(Modifier.fillMaxSize()) {
                     preview(Modifier.weight(1f).fillMaxWidth())
-                    tools(Modifier.fillMaxWidth().heightIn(max = toolHeight))
+                    tools(Modifier.fillMaxWidth().height(toolHeight))
                 }
             }
         }
@@ -319,5 +340,71 @@ private fun GifButton(icon: ImageVector, description: String, enabled: Boolean =
             isSelected -> OneUIBlue
             else -> Color.White
         })
+    }
+}
+
+/** The tool groups of the GIF creator, one tab each. */
+private enum class GifTool(val label: String) {
+    FRAMES("Frames"),
+    PLAYBACK("Playback"),
+    CROP("Crop"),
+    SIZE("Size")
+}
+
+/**
+ * Hand-rolled rather than Material's `TabRow`: the app's palette is not wired into
+ * `MaterialTheme`, so the stock row would draw its indicator and labels in colours meant for a
+ * different background.
+ */
+@Composable
+private fun GifToolTabs(selectedTool: GifTool, onSelect: (GifTool) -> Unit) {
+    Row(Modifier.fillMaxWidth()) {
+        GifTool.entries.forEach { tool ->
+            val isSelected = tool == selectedTool
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                    .weight(1f)
+                    .clickable(role = Role.Tab) { onSelect(tool) }
+                    .semantics { selected = isSelected }
+                    .padding(top = 10.dp)
+            ) {
+                Text(
+                    text = tool.label,
+                    color = if (isSelected) OneUIBlue else Color.White,
+                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
+                )
+                Box(
+                    Modifier
+                        .padding(top = 8.dp)
+                        .fillMaxWidth()
+                        .height(2.dp)
+                        .background(if (isSelected) OneUIBlue else Color(0x33FFFFFF))
+                )
+            }
+        }
+    }
+}
+
+/** An icon with its name underneath: inside a tab, every tool says what it does. */
+@Composable
+private fun GifToolButton(icon: ImageVector, label: String, description: String, enabled: Boolean = true,
+    isSelected: Boolean = false, onClick: () -> Unit) {
+    val tint = when {
+        !enabled -> Color.Gray
+        isSelected -> OneUIBlue
+        else -> Color.White
+    }
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .widthIn(min = 72.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .semantics { selected = isSelected }
+            .padding(horizontal = 8.dp, vertical = 8.dp)
+    ) {
+        Icon(icon, description, tint = tint)
+        Text(label, color = tint, fontSize = 11.sp, maxLines = 1)
     }
 }

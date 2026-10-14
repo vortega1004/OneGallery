@@ -9,7 +9,10 @@ import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.media.MediaScannerConnection
 import android.net.Uri
+import android.os.Build
+import android.os.Bundle
 import android.os.Environment
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import androidx.exifinterface.media.ExifInterface
@@ -44,6 +47,10 @@ class MediaStoreRepository(private val context: Context) {
      * each time a photo arrives would be noise.
      */
     private val scanRequested: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** Paths found on disk since the last full sweep — see [reconcileMissingFiles]. */
+    private val seenOnDisk: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    private var lastFullSweepMs = 0L
 
     fun observeMediaItems(): Flow<List<MediaItem>> = callbackFlow<Unit> {
         // The observer only signals; the query itself runs downstream on Dispatchers.IO
@@ -101,59 +108,101 @@ class MediaStoreRepository(private val context: Context) {
      * so every other app that reads it is corrected too.
      */
     private fun reconcileMissingFiles(items: List<MediaItem>) {
+        // One stat per file is cheap; one per file per re-query is not, on a library of thousands
+        // where a single snapshot causes three re-queries. Paths seen to exist are trusted until
+        // the next full sweep, which still catches a file that another app removed later.
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastFullSweepMs >= FULL_SWEEP_INTERVAL_MS) {
+            lastFullSweepMs = now
+            seenOnDisk.clear()
+        }
         val missing = items.asSequence()
             .map { it.path }
-            .filter { it.isNotBlank() && it !in scanRequested && !File(it).exists() }
+            .filter { it.isNotBlank() && it !in scanRequested && seenOnDisk.add(it) && !File(it).exists() }
             .toList()
         if (missing.isEmpty()) return
         scanRequested.addAll(missing)
         MediaScannerConnection.scanFile(context, missing.toTypedArray(), null, null)
     }
 
+    /**
+     * The whole library (or one bucket), read in pages keyed on `_id`.
+     *
+     * **Why not one query.** A cursor from another process is delivered in windows of about
+     * 2 MB, and each window after the first is filled by running the query *again* and skipping
+     * to a row number. If a row is inserted between two fills, every row after it moves down
+     * one: the row on the boundary is read twice and the last row is never read at all — while
+     * the row count, taken on the first fill, still looks right. Rows come back grouped by media
+     * type, so the row that goes missing is the newest video, and the insert that does it is
+     * this app's own snapshot. The video being watched dropped out of the library for one
+     * refresh and the viewer moved on to its neighbour. It needs a library big enough to span
+     * two windows (a few thousand items, fewer with long file names), which is why it only ever
+     * happened on a real phone.
+     *
+     * A page is far smaller than a window, so each one is a single consistent read, and asking
+     * for "ids after the last one seen" instead of "rows from position n" means a change made
+     * between two pages cannot shift anything: a new row is either picked up or left for the
+     * next refresh, which the observer is already about to trigger.
+     */
     fun queryMediaItems(bucketIdFilter: String? = null): List<MediaItem> {
-        val items = mutableListOf<MediaItem>()
+        val items = readInPages(PAGE_SIZE, MediaItem::id) { afterId ->
+            ArrayList<MediaItem>().also { queryPage(afterId, bucketIdFilter, it) }
+        }
 
-        val projection = arrayOf(
-            MediaStore.Files.FileColumns._ID,
-            MediaStore.Files.FileColumns.DATA,
-            MediaStore.Files.FileColumns.DISPLAY_NAME,
-            MediaStore.Files.FileColumns.MIME_TYPE,
-            MediaStore.Files.FileColumns.MEDIA_TYPE,
-            MediaStore.Files.FileColumns.DATE_TAKEN,
-            MediaStore.Files.FileColumns.DATE_ADDED,
-            MediaStore.Files.FileColumns.SIZE,
-            MediaStore.Files.FileColumns.WIDTH,
-            MediaStore.Files.FileColumns.HEIGHT,
-            MediaStore.Files.FileColumns.DURATION,
-            MediaStore.Files.FileColumns.ORIENTATION,
-            MediaStore.Files.FileColumns.BUCKET_ID,
-            MediaStore.Files.FileColumns.BUCKET_DISPLAY_NAME,
-            MediaStore.Files.FileColumns.RELATIVE_PATH,
-            MediaStore.Files.FileColumns.VOLUME_NAME
+        // DATE_TAKEN is NULL for screenshots, downloads and many videos, so a SQL sort would push
+        // those to the end. Sort on the resolved date (which falls back to DATE_ADDED) instead.
+        // The id settles ties — copies of one file share both dates — so two refreshes can never
+        // order the same items differently.
+        items.sortWith(
+            compareByDescending<MediaItem> { it.dateTaken }
+                .thenByDescending { it.dateAdded }
+                .thenBy { it.id }
         )
 
+        return items
+    }
+
+    /** Appends up to [PAGE_SIZE] rows with `_id` above [afterId] to [into]. */
+    private fun queryPage(afterId: Long, bucketIdFilter: String?, into: MutableList<MediaItem>) {
         val selection = buildString {
             append("(")
             append("${MediaStore.Files.FileColumns.MEDIA_TYPE} = ${MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE}")
             append(" OR ")
             append("${MediaStore.Files.FileColumns.MEDIA_TYPE} = ${MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO}")
             append(")")
+            append(" AND ${MediaStore.Files.FileColumns._ID} > ?")
             if (bucketIdFilter != null) {
                 append(" AND ${MediaStore.Files.FileColumns.BUCKET_ID} = ?")
             }
         }
-
-        val selectionArgs = if (bucketIdFilter != null) arrayOf(bucketIdFilter) else null
-
+        val selectionArgs = listOfNotNull(afterId.toString(), bucketIdFilter).toTypedArray()
+        val sortOrder = "${MediaStore.Files.FileColumns._ID} ASC"
         val queryUri = MediaStore.Files.getContentUri("external")
 
-        contentResolver.query(
-            queryUri,
-            projection,
-            selection,
-            selectionArgs,
-            null
-        )?.use { cursor ->
+        // The limit is what keeps a page inside one window. Android 11+ takes it as a query
+        // argument (verified on the API 37 image). Android 10 has no such argument; it is
+        // believed to accept `LIMIT` on the end of the sort order, which could not be verified
+        // here, so a refusal falls back to the unlimited query — the pre-paging behaviour,
+        // with its small chance of a torn read, rather than an empty gallery.
+        val cursor = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            contentResolver.query(
+                queryUri,
+                MEDIA_PROJECTION,
+                Bundle().apply {
+                    putString(ContentResolver.QUERY_ARG_SQL_SELECTION, selection)
+                    putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, selectionArgs)
+                    putString(ContentResolver.QUERY_ARG_SQL_SORT_ORDER, sortOrder)
+                    putInt(ContentResolver.QUERY_ARG_LIMIT, PAGE_SIZE)
+                },
+                null
+            )
+        } else {
+            runCatching {
+                contentResolver.query(queryUri, MEDIA_PROJECTION, selection, selectionArgs, "$sortOrder LIMIT $PAGE_SIZE")
+            }.getOrElse { contentResolver.query(queryUri, MEDIA_PROJECTION, selection, selectionArgs, sortOrder) }
+        }
+
+        cursor?.use {
             val idCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
             val dataCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DATA)
             val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DISPLAY_NAME)
@@ -202,7 +251,7 @@ class MediaStoreRepository(private val context: Context) {
                     ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
                 }
 
-                items.add(
+                into.add(
                     MediaItem(
                         id = id,
                         uri = contentUri,
@@ -225,14 +274,6 @@ class MediaStoreRepository(private val context: Context) {
                 )
             }
         }
-
-        // DATE_TAKEN is NULL for screenshots, downloads and many videos, so a SQL sort would push
-        // those to the end. Sort on the resolved date (which falls back to DATE_ADDED) instead.
-        items.sortWith(
-            compareByDescending<MediaItem> { it.dateTaken }.thenByDescending { it.dateAdded }
-        )
-
-        return items
     }
 
     /**
@@ -521,6 +562,34 @@ class MediaStoreRepository(private val context: Context) {
     private companion object {
         const val CHANGE_BURST_WINDOW_MS = 300L
 
+        /**
+         * Rows per query. Has to stay well inside one cursor window (about 2 MB) even when every
+         * path and name is as long as the filesystem allows — roughly 2 KB a row at the extreme.
+         */
+        const val PAGE_SIZE = 500
+
+        /** How often every path is re-checked on disk, rather than only the new ones. */
+        const val FULL_SWEEP_INTERVAL_MS = 5 * 60_000L
+
+        val MEDIA_PROJECTION = arrayOf(
+            MediaStore.Files.FileColumns._ID,
+            MediaStore.Files.FileColumns.DATA,
+            MediaStore.Files.FileColumns.DISPLAY_NAME,
+            MediaStore.Files.FileColumns.MIME_TYPE,
+            MediaStore.Files.FileColumns.MEDIA_TYPE,
+            MediaStore.Files.FileColumns.DATE_TAKEN,
+            MediaStore.Files.FileColumns.DATE_ADDED,
+            MediaStore.Files.FileColumns.SIZE,
+            MediaStore.Files.FileColumns.WIDTH,
+            MediaStore.Files.FileColumns.HEIGHT,
+            MediaStore.Files.FileColumns.DURATION,
+            MediaStore.Files.FileColumns.ORIENTATION,
+            MediaStore.Files.FileColumns.BUCKET_ID,
+            MediaStore.Files.FileColumns.BUCKET_DISPLAY_NAME,
+            MediaStore.Files.FileColumns.RELATIVE_PATH,
+            MediaStore.Files.FileColumns.VOLUME_NAME
+        )
+
         val COPIED_EXIF_TAGS = listOf(
             ExifInterface.TAG_MAKE,
             ExifInterface.TAG_MODEL,
@@ -536,4 +605,24 @@ class MediaStoreRepository(private val context: Context) {
         )
         val ISO_6709_PATTERN = Regex("""([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)""")
     }
+}
+
+/**
+ * Everything [page] can return, read in order: the first call asks for ids above -1, each next
+ * call for ids above the last one seen, until a page comes back short of [pageSize].
+ *
+ * A page that comes back *longer* than [pageSize] (a provider that ignored the limit) is taken
+ * whole; the next call then returns nothing and ends the loop, so a provider that cannot page
+ * costs one empty query rather than a wrong result.
+ */
+internal fun <T> readInPages(pageSize: Int, idOf: (T) -> Long, page: (afterId: Long) -> List<T>): MutableList<T> {
+    val all = ArrayList<T>()
+    var afterId = -1L
+    while (true) {
+        val read = page(afterId)
+        all.addAll(read)
+        if (read.size < pageSize) break
+        afterId = idOf(read.last())
+    }
+    return all
 }

@@ -68,7 +68,6 @@ import com.onegallery.app.domain.MediaItem
 import com.onegallery.app.domain.toAlbums
 import com.onegallery.app.ui.grid.GalleryGridScreen
 import com.onegallery.app.ui.move.MoveToAlbumSheet
-import com.onegallery.app.ui.grid.TAB_PICTURES
 import com.onegallery.app.ui.theme.DarkBackground
 import com.onegallery.app.ui.theme.OneGalleryTheme
 import com.onegallery.app.ui.viewer.MediaViewerScreen
@@ -198,19 +197,17 @@ fun GalleryApp(viewModel: GalleryViewModel) {
     // Grid browsing state lives here, not in GalleryGridScreen: the viewer *replaces* the grid
     // in the composition, so state owned by the grid would be discarded every time a photo is
     // opened. Holding it here is what makes back-from-viewer return to the album you were in.
-    var selectedTab by rememberSaveable { mutableIntStateOf(TAB_PICTURES) }
     var openedAlbumId by rememberSaveable { mutableStateOf<String?>(null) }
     var columnCount by rememberSaveable { mutableIntStateOf(3) }
 
     // Grid scroll positions live here for the same reason as the state above: the grid is
     // disposed while the viewer is open, so a state remembered inside it would reset to the
     // top of the library every time the user opened a photo.
-    val picturesGridState = rememberLazyGridState()
     val albumGridState = rememberLazyGridState()
     val albumListGridState = rememberLazyGridState()
     val scope = rememberCoroutineScope()
 
-    // Which album the viewer was opened from; null means the flat Pictures grid.
+    // Which album the viewer was opened from
     var viewerAlbumId by rememberSaveable { mutableStateOf<String?>(null) }
 
     // The item currently shown in the viewer, and the one the grid should return to on exit.
@@ -344,8 +341,6 @@ fun GalleryApp(viewModel: GalleryViewModel) {
         } else {
             GalleryGridScreen(
                 mediaItems = mediaItems,
-                selectedTab = selectedTab,
-                onTabChange = { selectedTab = it },
                 openedAlbumId = openedAlbumId,
                 onOpenAlbum = { albumId ->
                     // One LazyGridState serves every album, so without this a folder opens at
@@ -358,7 +353,6 @@ fun GalleryApp(viewModel: GalleryViewModel) {
                 },
                 columnCount = columnCount,
                 onColumnCountChange = { columnCount = it },
-                picturesGridState = picturesGridState,
                 albumGridState = albumGridState,
                 restoreToItemId = restoreToItemId,
                 onRestoreHandled = { restoreToItemId = null },
@@ -384,10 +378,7 @@ fun GalleryApp(viewModel: GalleryViewModel) {
                 onMediaSortChange = {
                     // Recorded against the album on screen, so each folder keeps its own order
                     viewModel.setMediaSort(openedAlbumId, it)
-                    scope.launch {
-                        picturesGridState.scrollToTopAfterReorder()
-                        albumGridState.scrollToTopAfterReorder()
-                    }
+                    scope.launch { albumGridState.scrollToTopAfterReorder() }
                 },
                 onItemClick = { albumId, index ->
                     viewerAlbumId = albumId

@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.snapping.rememberSnapFlingBehavior
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -92,7 +93,14 @@ fun FilmStripInfinityViewer(
     val latestCurrentIndex by rememberUpdatedState(currentIndex)
     val latestLastIndex by rememberUpdatedState(mediaItems.lastIndex)
 
-    var isSyncingFromPager by remember { mutableStateOf(false) }
+    // Whether the strip is moving because the user is moving it: a finger dragging it (and the
+    // fling that follows), or the glide to a thumbnail they tapped. Asked of the gesture itself
+    // rather than inferred from "a scroll I did not start" — the strip also scrolls when the
+    // pager leads, and a flag raised around that scroll is already lowered again by the time
+    // the collector below looks at it, so a pager-led move could be read as a scrub and sent
+    // straight back to the pager as a page change.
+    val isDragged by listState.interactionSource.collectIsDraggedAsState()
+    var isGlidingToTap by remember { mutableStateOf(false) }
 
     // Pager -> strip: mirror the pager's fractional position so the strip tracks the swipe 1:1
     LaunchedEffect(listState, itemStridePx) {
@@ -104,12 +112,7 @@ fun FilmStripInfinityViewer(
                 val clamped = position.coerceIn(0f, latestLastIndex.toFloat())
                 val index = floor(clamped).toInt()
                 val offsetPx = ((clamped - index) * itemStridePx).roundToInt()
-                isSyncingFromPager = true
-                try {
-                    listState.scrollToItem(index, offsetPx)
-                } finally {
-                    isSyncingFromPager = false
-                }
+                listState.scrollToItem(index, offsetPx)
             }
     }
 
@@ -128,13 +131,14 @@ fun FilmStripInfinityViewer(
     // item once the scroll (or its snap fling) has ended
     LaunchedEffect(listState) {
         var userScrolling = false
-        snapshotFlow { listState.isScrollInProgress to centerItemIndex }
-            .collect { (scrolling, centerIndex) ->
-                if (scrolling && !isSyncingFromPager) userScrolling = true
+        snapshotFlow { Triple(listState.isScrollInProgress, centerItemIndex, isDragged || isGlidingToTap) }
+            .collect { (scrolling, centerIndex, userDriven) ->
+                if (userDriven) userScrolling = true
                 if (userScrolling && centerIndex >= 0 && centerIndex != latestCurrentIndex) {
                     latestOnItemSelected(centerIndex)
                 }
-                if (!scrolling) userScrolling = false
+                // Outlives the drag itself: the fling after it is still the user's scrub
+                if (!scrolling && !userDriven) userScrolling = false
             }
     }
 
@@ -187,7 +191,12 @@ fun FilmStripInfinityViewer(
                         .clickable {
                             // Animating the strip counts as a user scrub, so the pager follows it
                             coroutineScope.launch {
-                                listState.animateScrollToItem(index)
+                                isGlidingToTap = true
+                                try {
+                                    listState.animateScrollToItem(index)
+                                } finally {
+                                    isGlidingToTap = false
+                                }
                             }
                         },
                     contentAlignment = Alignment.Center

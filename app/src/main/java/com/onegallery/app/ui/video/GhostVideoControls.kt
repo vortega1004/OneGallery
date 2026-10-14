@@ -3,13 +3,18 @@ package com.onegallery.app.ui.video
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.SkipNext
+import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -25,8 +30,14 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.onegallery.app.ui.common.ownedPress
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.floor
@@ -56,13 +67,20 @@ internal fun GhostIconButton(
     iconSize: Dp = 22.dp,
     emphasized: Boolean = false
 ) {
+    val latestOnClick by rememberUpdatedState(onClick)
     // The tappable box is deliberately larger than the painted circle: these sit over video with
     // no chrome to aim at, and a thumb reaching across the phone lands short of centre.
     Box(
         modifier = modifier
             .size(touchTargetFor(size))
             .clip(CircleShape)
-            .clickable(onClick = onClick),
+            // Not `clickable`: a thumb that slides a few pixels while pressing would hand the
+            // gesture to the pager and turn the press into a swipe to the next item.
+            .ownedPress(onRelease = { inside -> if (inside) latestOnClick() })
+            .semantics {
+                role = Role.Button
+                onClick { latestOnClick(); true }
+            },
         contentAlignment = Alignment.Center
     ) {
         Box(
@@ -95,57 +113,93 @@ internal fun GhostIconButton(
 private fun touchTargetFor(size: Dp): Dp = maxOf(size + TOUCH_SLOP_RING * 2, MIN_TOUCH_TARGET)
 
 /**
+ * The frame-hunting control: a jog strip with the previous/next-frame buttons on its two ends,
+ * drawn as one pill.
+ *
+ * One control instead of three so that all of it sits under the right thumb. The buttons used to
+ * stand in a row of their own beside the strip, which pushed the strip itself out to the far
+ * left of the phone where a thumb holding it cannot reach.
+ *
+ * [onStepFrames] carries whole frames from a drag on the strip; [onStepButton] is -1 or +1 from
+ * an end button — once on press, then repeating while held.
+ */
+@Composable
+internal fun FrameJogBar(
+    onScrubStart: () -> Unit,
+    onStepFrames: (Int) -> Unit,
+    onStepButton: (Int) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .height(JogBarHeight)
+            .clip(RoundedCornerShape(JogBarHeight / 2))
+            .background(GhostFill)
+            .border(1.dp, GhostOutline, RoundedCornerShape(JogBarHeight / 2)),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        JogStepButton(Icons.Rounded.SkipPrevious, "Previous frame") { onStepButton(-1) }
+        FrameJogStrip(
+            onScrubStart = onScrubStart,
+            onStepFrames = onStepFrames,
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxHeight()
+        )
+        JogStepButton(Icons.Rounded.SkipNext, "Next frame") { onStepButton(1) }
+    }
+}
+
+/**
  * Fires [onStep] once on press, then keeps firing while held — tap for a single frame, hold to
  * walk through frames without lifting the thumb.
  */
 @Composable
-internal fun GhostRepeatButton(
+private fun JogStepButton(
     icon: ImageVector,
     contentDescription: String,
-    onStep: () -> Unit,
-    modifier: Modifier = Modifier,
-    size: Dp = 48.dp
+    onStep: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
     val latestOnStep by rememberUpdatedState(onStep)
+    // Plain holder, not state: nothing is drawn from it
+    val repeater = remember { arrayOfNulls<Job>(1) }
 
     Box(
-        modifier = modifier
-            .size(touchTargetFor(size))
-            .clip(CircleShape)
-            .pointerInput(Unit) {
-                detectTapGestures(
-                    onPress = {
-                        val repeater = scope.launch {
+        modifier = Modifier
+            .width(JogButtonWidth)
+            .fillMaxHeight()
+            .ownedPress(
+                onPress = {
+                    // The first step is taken here, not inside the coroutine: a launched
+                    // coroutine only starts on the next dispatch, and a quick tap lifts — and
+                    // cancels it — before that, so the tap did nothing at all.
+                    latestOnStep()
+                    repeater[0] = scope.launch {
+                        delay(HOLD_BEFORE_REPEAT_MS)
+                        while (true) {
                             latestOnStep()
-                            delay(HOLD_BEFORE_REPEAT_MS)
-                            while (true) {
-                                latestOnStep()
-                                delay(REPEAT_INTERVAL_MS)
-                            }
+                            delay(REPEAT_INTERVAL_MS)
                         }
-                        tryAwaitRelease()
-                        repeater.cancel()
                     }
-                )
+                },
+                onRelease = {
+                    repeater[0]?.cancel()
+                    repeater[0] = null
+                }
+            )
+            .semantics {
+                role = Role.Button
+                onClick { latestOnStep(); true }
             },
         contentAlignment = Alignment.Center
     ) {
-        Box(
-            modifier = Modifier
-                .size(size)
-                .clip(CircleShape)
-                .background(GhostFill)
-                .border(1.dp, GhostOutline, CircleShape),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = contentDescription,
-                tint = GhostContent,
-                modifier = Modifier.size(24.dp)
-            )
-        }
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = GhostContent,
+            modifier = Modifier.size(24.dp)
+        )
     }
 }
 
@@ -173,9 +227,6 @@ internal fun FrameJogStrip(
 
     Canvas(
         modifier = modifier
-            .clip(RoundedCornerShape(12.dp))
-            .background(GhostFill)
-            .border(1.dp, GhostOutline, RoundedCornerShape(12.dp))
             .pointerInput(Unit) {
                 val pxPerFrame = JOG_DP_PER_FRAME.dp.toPx()
                 var carriedPx = 0f
@@ -221,6 +272,16 @@ internal fun FrameJogStrip(
             index++
         }
 
+        // Where the strip ends and each button begins
+        for (edge in listOf(0f, size.width)) {
+            drawLine(
+                color = GhostOutline,
+                start = Offset(edge, size.height * 0.2f),
+                end = Offset(edge, size.height * 0.8f),
+                strokeWidth = 1.dp.toPx()
+            )
+        }
+
         // Fixed centre needle: "this is the frame you're on"
         drawLine(
             color = Color.White,
@@ -259,6 +320,10 @@ internal fun frameStepPositionMs(
 internal const val DEFAULT_FRAME_RATE = 30.0
 
 private const val JOG_DP_PER_FRAME = 12
+
+/** A full touch target tall, because the step buttons on its ends are pressed, not dragged. */
+private val JogBarHeight = 48.dp
+private val JogButtonWidth = 48.dp
 private const val HOLD_BEFORE_REPEAT_MS = 350L
 private const val REPEAT_INTERVAL_MS = 70L
 

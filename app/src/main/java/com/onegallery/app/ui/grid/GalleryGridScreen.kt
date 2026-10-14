@@ -40,17 +40,12 @@ import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Checklist
 import androidx.compose.material.icons.rounded.RadioButtonUnchecked
 import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.Folder
-import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -89,31 +84,30 @@ import com.onegallery.app.ui.theme.OneUIBlue
 import com.onegallery.app.ui.gif.MAX_GIF_FRAMES
 import com.onegallery.app.ui.gif.selectionBetween
 
-const val TAB_PICTURES = 0
-const val TAB_ALBUMS = 1
-const val TAB_SEARCH = 2
-
 /**
- * Browsing state ([selectedTab], [openedAlbumId], [columnCount]) is **hoisted deliberately**.
+ * The album list, and the contents of whichever album is open.
+ *
+ * There are no tabs. The app opens on its albums and that is the only way in: the flat
+ * "Pictures" grid and the unbuilt "Search" tab were removed at the owner's request, and with
+ * them the bottom bar — which now appears only while selecting, as the selection's action bar.
+ *
+ * Browsing state ([openedAlbumId], [columnCount]) is **hoisted deliberately**.
  * The viewer replaces this screen in the composition rather than stacking on top of it, so any
  * state owned here would be discarded the moment a photo is opened — `rememberSaveable` does
  * not survive its composable leaving the tree. Keeping it in the caller is what makes "back
  * from the viewer returns to the album you were in" work.
  *
- * @param onItemClick receives the album (bucket) id the item was opened from, or `null` when
- *   opened from the flat Pictures grid. The caller uses it to scope the viewer's pager to the
- *   same set the user was looking at, so swiping inside an album stays inside that album.
+ * @param onItemClick receives the album (bucket) id the item was opened from. The caller uses
+ *   it to scope the viewer's pager to the same set the user was looking at, so swiping inside
+ *   an album stays inside that album.
  */
 @Composable
 fun GalleryGridScreen(
     mediaItems: List<MediaItem>,
-    selectedTab: Int,
-    onTabChange: (Int) -> Unit,
     openedAlbumId: String?,
     onOpenAlbum: (String?) -> Unit,
     columnCount: Int,
     onColumnCountChange: (Int) -> Unit,
-    picturesGridState: LazyGridState,
     albumGridState: LazyGridState,
     restoreToItemId: Long?,
     onRestoreHandled: () -> Unit,
@@ -122,7 +116,7 @@ fun GalleryGridScreen(
     onAlbumSortChange: (AlbumSort) -> Unit,
     mediaSort: MediaSort,
     onMediaSortChange: (MediaSort) -> Unit,
-    onItemClick: (albumId: String?, index: Int) -> Unit,
+    onItemClick: (albumId: String, index: Int) -> Unit,
     selectionMode: Boolean,
     selectedImageIds: Set<Long>,
     onSelectionModeChange: (Boolean) -> Unit,
@@ -135,9 +129,6 @@ fun GalleryGridScreen(
     val albums = remember(mediaItems, albumSort) { mediaItems.toAlbums().sortedBy(albumSort) }
     val openedAlbum = remember(albums, openedAlbumId) {
         albums.firstOrNull { it.id == openedAlbumId }
-    }
-    val sortedAllItems = remember(mediaItems, mediaSort) {
-        mediaItems.forAlbum(null).sortedBy(mediaSort)
     }
     // Everything is selectable: selection serves moving as well as GIFs. The GIF creator takes
     // the stills out of it and ignores the rest.
@@ -183,46 +174,14 @@ fun GalleryGridScreen(
                         }
                     }
                 }
-            } else NavigationBar(
-                containerColor = DarkSurface,
-                tonalElevation = 8.dp
-            ) {
-                GalleryTab(
-                    selected = selectedTab == TAB_PICTURES,
-                    icon = Icons.Rounded.Image,
-                    label = "Pictures"
-                ) {
-                    onTabChange(TAB_PICTURES)
-                    onOpenAlbum(null)
-                }
-                GalleryTab(
-                    selected = selectedTab == TAB_ALBUMS,
-                    icon = Icons.Rounded.Folder,
-                    label = "Albums"
-                ) {
-                    // Re-tapping Albums while inside a folder pops back to the folder list.
-                    if (selectedTab == TAB_ALBUMS) onOpenAlbum(null)
-                    onTabChange(TAB_ALBUMS)
-                }
-                GalleryTab(
-                    selected = selectedTab == TAB_SEARCH,
-                    icon = Icons.Rounded.Search,
-                    label = "Search"
-                ) {
-                    onTabChange(TAB_SEARCH)
-                    onOpenAlbum(null)
-                }
             }
         }
     ) { innerPadding ->
-        // Tab switches fade; drilling into / out of an album also slides, in the direction of
-        // travel. contentKey keeps a live MediaStore update (which changes the Album object's
-        // counts) from being mistaken for a navigation and re-running the transition.
+        // Drilling into / out of an album slides in the direction of travel. contentKey keeps a
+        // live MediaStore update (which changes the Album object's counts) from being mistaken
+        // for a navigation and re-running the transition.
         AnimatedContent(
-            targetState = GridDestination(
-                tab = selectedTab,
-                album = if (selectedTab == TAB_ALBUMS) openedAlbum else null
-            ),
+            targetState = GridDestination(album = openedAlbum),
             contentKey = { it.key },
             transitionSpec = {
                 val direction = when {
@@ -287,7 +246,7 @@ fun GalleryGridScreen(
                         )
                     }
 
-                    destination.tab == TAB_ALBUMS -> {
+                    else -> {
                         OneUIHeader(
                             title = "Albums",
                             subtitle = albumCountLabel(albums.size, mediaItems.size),
@@ -307,52 +266,15 @@ fun GalleryGridScreen(
                             onAlbumClick = { onOpenAlbum(it.id) }
                         )
                     }
-
-                    destination.tab == TAB_SEARCH -> {
-                        OneUIHeader(title = "Search", subtitle = "Not implemented yet")
-                        EmptyState("Search hasn't been built yet.")
-                    }
-
-                    else -> {
-                        if (selectionMode) SelectionHeader(selectedItems.size, clearSelection) else OneUIHeader(
-                            title = "Pictures",
-                            subtitle = itemCountLabel(sortedAllItems.size),
-                            trailing = {
-                                IconButton(onClick = { onSelectionModeChange(true) }) {
-                                    Icon(Icons.Rounded.Checklist, "Select items", tint = DarkTextPrimary)
-                                }
-                                SortMenu(
-                                    current = mediaSort,
-                                    options = MediaSort.entries,
-                                    label = { it.label },
-                                    contentDescription = "Sort photos and videos",
-                                    onSelect = onMediaSortChange
-                                )
-                            }
-                        )
-                        MediaGrid(
-                            mediaItems = sortedAllItems,
-                            columnCount = columnCount,
-                            onColumnCountChange = onColumnCountChange,
-                            gridState = picturesGridState,
-                            restoreToItemId = restoreToItemId,
-                            onRestoreHandled = onRestoreHandled,
-                            selectionMode = selectionMode,
-                            selectedIds = selectedImageIds,
-                            onSelectionChange = changeSelection,
-                            onSelectionStart = { onSelectionModeChange(true) },
-                            onItemClick = { index -> onItemClick(null, index) }
-                        )
-                    }
                 }
             }
         }
     }
 }
 
-/** Where the grid screen is; [album] is only set while inside a folder on the Albums tab. */
-private data class GridDestination(val tab: Int, val album: Album?) {
-    val key: String get() = if (album != null) "album:${album.id}" else "tab:$tab"
+/** Where the grid screen is: inside [album], or on the album list when it is null. */
+private data class GridDestination(val album: Album?) {
+    val key: String get() = if (album != null) "album:${album.id}" else "albums"
 }
 
 private const val DESTINATION_ENTER_MS = 200
@@ -364,26 +286,6 @@ private fun itemCountLabel(count: Int): String =
 private fun albumCountLabel(albumCount: Int, itemCount: Int): String {
     val albumsPart = if (albumCount == 1) "1 album" else "$albumCount albums"
     return "$albumsPart · ${itemCountLabel(itemCount)}"
-}
-
-@Composable
-private fun androidx.compose.foundation.layout.RowScope.GalleryTab(
-    selected: Boolean,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    label: String,
-    onClick: () -> Unit
-) {
-    NavigationBarItem(
-        selected = selected,
-        onClick = onClick,
-        icon = { Icon(icon, contentDescription = label) },
-        label = { Text(label) },
-        colors = NavigationBarItemDefaults.colors(
-            selectedIconColor = Color.White,
-            selectedTextColor = OneUIBlue,
-            indicatorColor = OneUIBlue
-        )
-    )
 }
 
 @Composable
