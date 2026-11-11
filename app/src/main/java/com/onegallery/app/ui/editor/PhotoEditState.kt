@@ -114,10 +114,12 @@ data class PhotoEditState(
     /** 0.5..1.5, 1 = unchanged */
     val contrast: Float = 1f,
     /** 0..2, 1 = unchanged, 0 = greyscale */
-    val saturation: Float = 1f
+    val saturation: Float = 1f,
+    /** The canvas the finished photo is placed on, if any. Applied last — see [CanvasFill]. */
+    val canvas: CanvasFill = CanvasFill()
 ) {
     val hasGeometryChanges: Boolean
-        get() = flipHorizontal || rotationDegrees != 0 || !crop.isFull
+        get() = flipHorizontal || rotationDegrees != 0 || !crop.isFull || canvas.isActive
 
     val hasColorAdjustments: Boolean
         get() = brightness != 0f || contrast != 1f || saturation != 1f
@@ -128,6 +130,24 @@ data class PhotoEditState(
     /** True when the visible image is on its side relative to the source. */
     val swapsDimensions: Boolean
         get() = rotationDegrees == 90 || rotationDegrees == 270
+
+    /**
+     * The size, in pixels, of the file this edit saves from an upright source of
+     * [sourceWidth] x [sourceHeight], when the source is first reduced to [maxSourceSide] on
+     * its longest side (as saving does). For telling the user what they will get.
+     */
+    fun outputSize(sourceWidth: Int, sourceHeight: Int, maxSourceSide: Int): Pair<Int, Int> {
+        val longest = maxOf(sourceWidth, sourceHeight)
+        val scale = if (longest > maxSourceSide) maxSourceSide.toFloat() / longest else 1f
+        val decodedWidth = Math.round(sourceWidth * scale).coerceAtLeast(1)
+        val decodedHeight = Math.round(sourceHeight * scale).coerceAtLeast(1)
+        val uprightWidth = if (swapsDimensions) decodedHeight else decodedWidth
+        val uprightHeight = if (swapsDimensions) decodedWidth else decodedHeight
+        val keptWidth = Math.round(crop.width * uprightWidth).coerceIn(1, uprightWidth)
+        val keptHeight = Math.round(crop.height * uprightHeight).coerceIn(1, uprightHeight)
+        val placed = canvas.layout(keptWidth, keptHeight) ?: return keptWidth to keptHeight
+        return placed.canvasWidth to placed.canvasHeight
+    }
 
     fun rotateClockwise() = copy(
         rotationDegrees = (rotationDegrees + 90) % 360,

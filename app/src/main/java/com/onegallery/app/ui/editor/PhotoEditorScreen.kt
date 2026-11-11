@@ -58,8 +58,11 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.onegallery.app.data.EditorPreferencesRepository
 import com.onegallery.app.data.MediaStoreRepository
 import com.onegallery.app.domain.MediaItem
 import com.onegallery.app.ui.theme.OneUIBlue
@@ -72,7 +75,8 @@ import kotlin.math.roundToInt
 
 private enum class EditorTool(val label: String) {
     CROP("Crop & rotate"),
-    ADJUST("Adjust")
+    ADJUST("Adjust"),
+    CANVAS("Canvas")
 }
 
 private data class AspectPreset(val label: String, val aspect: Float?)
@@ -87,8 +91,9 @@ private val ASPECT_PRESETS = listOf(
 )
 
 /**
- * Basic, non-destructive photo editor: rotate, mirror, free-form crop (with aspect presets)
- * and brightness / contrast / saturation. Saving always writes a **copy** — see
+ * Basic, non-destructive photo editor: rotate, mirror, free-form crop (with aspect presets),
+ * brightness / contrast / saturation, and placing the result on a larger canvas filled with a
+ * flat colour ([CanvasFill]). Saving always writes a **copy** — see
  * [MediaStoreRepository.saveEditedImage].
  *
  * Works on a [PhotoEditRenderer.PREVIEW_MAX_PX] preview; the full-resolution file is only
@@ -111,11 +116,22 @@ fun PhotoEditorScreen(
     var isSaving by remember { mutableStateOf(false) }
     var loadFailed by remember(mediaItem.uri) { mutableStateOf(false) }
 
+    // Canvas tool. The fill starts green every time (it is part of editState, which is new
+    // for each photo); only the list of colours used before is remembered across uses.
+    val editorPreferences = remember { EditorPreferencesRepository(appContext) }
+    val recentColors by editorPreferences.recentFillColors.collectAsStateWithLifecycle(emptyList())
+    var showFinalCanvas by remember(mediaItem.uri) { mutableStateOf(false) }
+    var pickingColor by remember { mutableStateOf(false) }
+    // The photo's real size, for telling the user what the saved canvas will measure
+    var sourceSize by remember(mediaItem.uri) { mutableStateOf<IntSize?>(null) }
+
     // Upright preview of the untouched photo
     val basePreview by produceState<Bitmap?>(initialValue = null, mediaItem.uri) {
         value = withContext(Dispatchers.IO) {
             try {
-                PhotoEditRenderer.decode(appContext, mediaItem.uri, PhotoEditRenderer.PREVIEW_MAX_PX)
+                PhotoEditRenderer.decode(appContext, mediaItem.uri, PhotoEditRenderer.PREVIEW_MAX_PX) { width, height ->
+                    sourceSize = IntSize(width, height)
+                }
             } catch (e: Exception) {
                 e.printStackTrace()
                 null
@@ -193,7 +209,20 @@ fun PhotoEditorScreen(
                             ColorFilter.colorMatrix(ColorMatrix(colorValues))
                         }
 
-                        Box(modifier = Modifier.size(fittedWidth, fittedHeight)) {
+                        if (tool == EditorTool.CANVAS && editState.canvas.isActive) {
+                            // The photo as it will sit on its canvas; drag it to place it
+                            CanvasPreview(
+                                preview = preview,
+                                crop = editState.crop,
+                                colorFilter = if (editState.hasColorAdjustments) colorFilter else null,
+                                fill = editState.canvas,
+                                showFinal = showFinalCanvas,
+                                interactive = !isSaving,
+                                onFillChange = { editState = editState.copy(canvas = it) },
+                                maxWidth = maxWidth,
+                                maxHeight = maxHeight
+                            )
+                        } else Box(modifier = Modifier.size(fittedWidth, fittedHeight)) {
                             Image(
                                 bitmap = remember(preview) { preview.asImageBitmap() },
                                 contentDescription = mediaItem.displayName,
@@ -245,6 +274,18 @@ fun PhotoEditorScreen(
                     state = editState,
                     onStateChange = { editState = it }
                 )
+
+                EditorTool.CANVAS -> CanvasPanel(
+                    fill = editState.canvas,
+                    outputSize = sourceSize?.let {
+                        editState.outputSize(it.width, it.height, PhotoEditRenderer.SAVE_MAX_PX)
+                    },
+                    recentColors = recentColors,
+                    showFinal = showFinalCanvas,
+                    onShowFinalChange = { showFinalCanvas = it },
+                    onFillChange = { editState = editState.copy(canvas = it) },
+                    onPickColor = { pickingColor = true }
+                )
             }
 
             // Tool switcher
@@ -265,6 +306,18 @@ fun PhotoEditorScreen(
                     }
                 }
             }
+        }
+
+        if (pickingColor) {
+            ColorPickerDialog(
+                initialColor = editState.canvas.color,
+                onPick = { color ->
+                    pickingColor = false
+                    editState = editState.copy(canvas = editState.canvas.copy(color = color))
+                    scope.launch { editorPreferences.rememberFillColor(color) }
+                },
+                onDismiss = { pickingColor = false }
+            )
         }
 
         if (isSaving) {

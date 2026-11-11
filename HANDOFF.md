@@ -1,5 +1,9 @@
 # OneGallery — Engineering Handoff
 
+**Latest:** 2026-11-10, branch `canvas-fill` (on top of `performance`) — the photo editor has a
+third tool, **Canvas**: put the photo, unscaled, on a larger canvas of a chosen shape and fill
+the rest with a flat colour (green by default, for keying). Emulator only; see the §7 entry.
+
 **Last verified:** 2026-11-10 (four stacked branches off `main`: `video-engine` → `trash` →
 `album-order-groups` → `performance`; nothing from them has run on the owner's Pixel) — the
 owner reported that frame stepping "doesn't work" after pressing the timeline to the end of a
@@ -132,6 +136,7 @@ crashes** on either. Anything the emulator's tiny library cannot exercise is cal
 
 | Item | Status |
 | --- | --- |
+| Editor → Canvas (fit to a shape, fill the rest) | **VERIFIED on emulator** (2026-11-10). 1080×1920 portrait → 1:1, dragged left, saved: 1920×1920, photo untouched at x 0–1079, fill reads (0,255,1) after JPEG. 1920×1080 landscape cropped 1:1 then → 9:16, photo dragged to the bottom: saved 1080×1920, green above. Colour picker → `#1C1AD1` appears in the recent list; reopening the editor starts on green with it still listed. Room slider + free drag in both directions; the eye button swaps the glass working view for the flat fill |
 | Frame stepping at the end of a single-keyframe (ComfyUI-style) clip | **FIXED, VERIFIED on emulator** (2026-11-10). Before: on a 241-frame 1080×1920 libx264 clip with one keyframe, steps near the start were instant and each run of 8 near the end took 2.9–3.1 s (the `IMediaMetadataRetriever` binder call, from logcat). After (`FrameServer`): *previous* pressed straight after dragging to the end shows frame 240/241 with the right picture ("U 239" burned in), and 12 more steps back are all in memory 0.5 s later |
 | Frame numbers on variable-rate footage | **FIXED, VERIFIED on emulator** — a VFR clip with audio 0.4 s longer than its video: *previous* on the last frame went to 241/252 before, 251/252 after. The readout says 16 fps for a 16 fps clip (was 15.80), 24 (was 23.80), 30 (was 29.88) |
 | A walk started straight after a slow seek | **FIXED, VERIFIED on emulator** — it started from the frame still on screen from *before* the seek (16/241 instead of 240/241 on the clip above); now it starts where the seek went |
@@ -1004,6 +1009,37 @@ Changing either of these back will break things silently, with no error:
   time a text field is focused and swallows `input text`. Tap the field, then type.
 
 ## 7. Changelog
+
+### 2026-11-10 — editor: Canvas (fit to a shape, fill the rest with green)
+
+Branch `canvas-fill`, on `performance`. Emulator only.
+
+**What the owner asked for.** Take a 9:16 photo, choose "square", and get a square picture in
+which the photo is unchanged and the rest is flat green — for green-screen work. Nothing
+generated or stretched. Choose where the photo sits (drag), crop it first if wanted, green by
+default always, the last five colours remembered, a colour picker, a working view that is easy
+on the eyes with a "show me the real thing" button that has no text. Samples were shown and
+approved before any of it was built.
+
+**What it is.**
+- `CanvasFill` (pure, in `PhotoEditState.canvas`): shape, room (1–3×), anchor x/y, colour.
+  `layout()` gives the smallest canvas of the shape that holds the photo, times the room, and
+  where the photo goes. Above 24 MP the whole composition is scaled down together — the one
+  case where the photo does not keep its pixels (a 12 MP photo made 9:16 is already 28 MP).
+- Applied last in `PhotoEditRenderer.render`: after the crop (so "crop, then place" works) and
+  after the colour adjustments (which must not tint the fill).
+- `CanvasPreview`: the unfilled area is drawn as dark glass with a light rim and a faint wash
+  of the chosen colour; the eye button draws it as saved. Dragging settles on the edges and
+  the middle (`snapAnchor`), with the un-snapped position kept separately so a photo resting
+  on a snap point can be dragged off it.
+- `ColorPickerDialog` (shade square, hue strip, hex field). `EditorPreferencesRepository`
+  keeps the five most recent colours; the fill itself is part of the per-photo edit state, so
+  it is green every time the editor opens.
+
+**Not done.** Custom ratios (nine presets only); PNG output (the copy is a JPEG — the fill
+came back as (0,255,1), fine for keying, but the edge between photo and fill is JPEG-soft);
+videos and GIFs. The size readout shows the capped size when the 24 MP limit applies but does
+not say that the photo was reduced.
 
 ### 2026-11-10 — a frame decoder of our own; trash; album order and groups; a build for the phone
 

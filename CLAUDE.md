@@ -71,8 +71,10 @@ app/src/main/java/com/onegallery/app/
 │   │   ├── ExifDetails.kt             # EXIF reader (camera, exposure, GPS) for the sheet
 │   │   └── SwipeUpGesture.kt          # Non-consuming swipe-up detector
 │   ├── editor/
-│   │   ├── PhotoEditorScreen.kt       # Basic editor: crop & rotate, adjust, save a copy
+│   │   ├── PhotoEditorScreen.kt       # Basic editor: crop & rotate, adjust, canvas, save a copy
 │   │   ├── PhotoEditState.kt          # Pure edit state + transform/crop/colour math
+│   │   ├── CanvasFill.kt              # Photo on a larger canvas with a flat fill (pure geometry)
+│   │   ├── CanvasFillUi.kt            # Canvas preview (glass / final), controls, colour picker
 │   │   └── PhotoEditRenderer.kt       # Applies an edit to a bitmap
 │   ├── common/
 │   │   └── MediaImageRequests.kt      # Shared Coil requests (thumbnail stand-in / full-size)
