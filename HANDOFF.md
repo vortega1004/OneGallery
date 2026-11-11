@@ -1061,8 +1061,9 @@ fps, no audio — made with ffmpeg, in `Movies/Comfy` on the AVD):
 
 **Not done / not known.**
 - Nothing ran on the Pixel. In particular: decode speed and memory of `FrameServer` on 4K60
-  HEVC, GL read-back on its GPU, HDR tone-mapping (`KEY_COLOR_TRANSFER_REQUEST`), rotated
-  phone footage (the surface transform should handle it; no rotated clip was tested).
+  HEVC, GL read-back on its GPU, HDR tone-mapping (`KEY_COLOR_TRANSFER_REQUEST`). (Rotated
+  footage *was* checked on the AVD: a 1280×720 clip flagged rotation 90 steps upright, the
+  still matching the player's picture.)
 - FFmpeg playback picture (§6.18). Which format the owner's failing files are, if any.
 - The whole-phone failure. If it recurs: `adb logcat -d` *before* restarting is the only way
   to learn what died.
