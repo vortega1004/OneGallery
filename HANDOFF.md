@@ -1,7 +1,21 @@
 # OneGallery — Engineering Handoff
 
-**Last verified:** 2026-10-02 (second pass, branch `viewer-controls-and-gif-tabs`, not yet
-merged) — the snapshot bug the owner still saw on his phone is reproduced on the emulator and
+**Last verified:** 2026-11-10 (four stacked branches off `main`: `video-engine` → `trash` →
+`album-order-groups` → `performance`; nothing from them has run on the owner's Pixel) — the
+owner reported that frame stepping "doesn't work" after pressing the timeline to the end of a
+video, that playback is "still funky", and asked for a trash, a fixed album order with
+drag-to-rearrange, and album groups. He mostly watches videos he makes with **ComfyUI**, which
+turned out to be the key: those clips have one keyframe for their whole length, and the frame
+cache re-decoded the entire clip for every run of eight frames near the end (≈3 s a run on the
+AVD). Frame stepping now runs on a decoder of its own (`FrameServer`) with real per-frame
+timestamps (`VideoTimeline`); one player exists at a time; Delete goes to Android's trash and
+there is a trash screen; the album list has an arrangement only the user changes, with groups;
+the library's albums are worked out off the main thread; and there is an optimised, installable
+build (`assembleDaily`). 79 unit tests per variant. Everything was exercised on the AVD against
+ComfyUI-style clips made for the purpose — see the §7 entry for what was measured and what the
+emulator could not show (FFmpeg-decoded *playback* is green there, §6.18).
+Before that, 2026-10-02 (second pass, merged to `main` 2026-10-13 as PR #3 after the owner
+used it on his Pixel) — the snapshot bug the owner still saw on his phone is reproduced on the emulator and
 fixed at its cause: on a library large enough to span two cursor windows, a row inserted while
 the library was being read made MediaStore skip the newest video for one refresh, and the
 viewer moved on to its neighbour. The library is now read in id-keyed pages (also ~10× faster
@@ -118,6 +132,16 @@ crashes** on either. Anything the emulator's tiny library cannot exercise is cal
 
 | Item | Status |
 | --- | --- |
+| Frame stepping at the end of a single-keyframe (ComfyUI-style) clip | **FIXED, VERIFIED on emulator** (2026-11-10). Before: on a 241-frame 1080×1920 libx264 clip with one keyframe, steps near the start were instant and each run of 8 near the end took 2.9–3.1 s (the `IMediaMetadataRetriever` binder call, from logcat). After (`FrameServer`): *previous* pressed straight after dragging to the end shows frame 240/241 with the right picture ("U 239" burned in), and 12 more steps back are all in memory 0.5 s later |
+| Frame numbers on variable-rate footage | **FIXED, VERIFIED on emulator** — a VFR clip with audio 0.4 s longer than its video: *previous* on the last frame went to 241/252 before, 251/252 after. The readout says 16 fps for a 16 fps clip (was 15.80), 24 (was 23.80), 30 (was 29.88) |
+| A walk started straight after a slow seek | **FIXED, VERIFIED on emulator** — it started from the frame still on screen from *before* the seek (16/241 instead of 240/241 on the clip above); now it starts where the seek went |
+| Player's clock vs the file's frame times | **VERIFIED on emulator** — on a B-frame clip the player drew 633333 µs and `VideoTimeline` has that frame at 633333 µs (`VideoWalk` log line). Not checked on the Pixel's hardware decoder |
+| One player at a time | **VERIFIED on emulator** — swiping between videos logs exactly one `ExoPlayerImpl: Release` then one `Init` per page change |
+| Snapshot = the frame on screen | **VERIFIED on emulator** — stepping: saved file shows "W 13" at 812 ms, the frame on screen (14/81). Playing: saved "W 3", the same frame the badge copied off the surface. The badge now appears at once (`PixelCopy` / the stepped-to still) |
+| A video the phone's decoders refuse (10-bit H.265 on the AVD) | **PARTLY VERIFIED** — its grid tile was gray and now has a picture (FFmpeg thumbnail; also under R8). It plays instead of sitting at 0:00, **but FFmpeg-decoded video is solid green on the emulator, for ordinary 8-bit clips too** — the emulator's surface, as far as can be told, so the picture is unverified until it runs on a phone (§6.18) |
+| Trash | **VERIFIED on emulator** (All files access granted) — viewer Delete → "Moved 1 item to the trash · Undo"; Undo restores; grid selection Trash (3); trash screen shows the item with "30 days"; Restore returns the file to its folder under its own name; Empty trash asks, then deletes. The consent-dialog path (no All files access) is **untested** |
+| Album order and groups | **VERIFIED on emulator** — long-press drag moves a tile and the order survives a restart; a new file arriving in an album does not move it; two albums grouped into a tile ("2 albums · 10498"), opened, an album opened from it, back → group → list; take one out; ungroup |
+| `gradlew assembleDaily` | **VERIFIED** (2026-11-10) — 22 MB, R8-minified, debug-signed; stepping, FFmpeg thumbnail and trash re-checked on it |
 | `gradlew assembleDebug` | **VERIFIED PASSING** (2026-10-02, second pass, from `clean`) — 66 MB `app-debug.apk` |
 | `gradlew assembleRelease` | **VERIFIED PASSING** (same) — 4.9 MB minified (R8 + `proguard-rules.pro` work). `lintVitalAnalyzeRelease` failed once mid-run on this machine and passed on its own straight after; nothing in the sources changed between the two |
 | Compile warnings | **Zero from this project's sources** (re-verified 2026-10-02, second pass) — verified with `gradlew clean` then `assembleDebug assembleRelease testDebugUnitTest --rerun-tasks`, which is the only way to see them (see §9). Four `Icons.Rounded.*` deprecations were live and this row wrongly said zero: `VolumeOff`/`VolumeUp` (`VideoPlayerView`) and `RotateLeft`/`RotateRight` (`PhotoEditorScreen`). All four are fixed by moving to `Icons.AutoMirrored.Rounded.*`, not suppressed. The AGP-vs-`compileSdk` advisory from the toolchain is unrelated to the sources and still prints |
@@ -221,6 +245,19 @@ gradlew.bat assembleDebug
 
 ```bash
 adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+**For everyday use on a phone, install the `daily` build, not `debug`.** It is `release`
+(R8, not debuggable) signed with the debug key, so it needs no keystore and installs over a
+debug build without losing data. A debuggable build switches off most of ART's optimisations;
+Compose is several times slower in it.
+
+```bash
+gradlew.bat assembleDaily
+```
+
+```bash
+adb install -r app/build/outputs/apk/daily/app-daily.apk
 ```
 
 > **Note:** AGP 8.5.2 warns that `compileSdk = 35` is newer than it officially supports. The
@@ -685,7 +722,34 @@ whatever he actually noticed is not written down anywhere yet.
 > The fixes from the 2026-09-18 pass have since been **built and smoke-tested** on the AVD —
 > §1 records exactly which were confirmed and which were not reachable by automated testing.
 
-### 6.3 The "instant TextureView" capture path never fires — HIGH (feature degraded)
+### 6.18 FFmpeg software decoding — picture unverified, and a licence to mind — MEDIUM
+
+`VideoPlayerView.kt` (`NextRenderersFactory`), `MediaThumbnailFetcher.kt`, `VideoSnapshotManager.kt`
+
+NextLib (`io.github.anilbeesetti:nextlib-media3ext` and `-mediainfo`, `1.8.0-0.9.0`, tied to
+Media3 1.8.0) puts FFmpeg's decoders behind the phone's own (`EXTENSION_RENDERER_MODE_ON`), for
+formats hardware refuses — 10-bit H.264, 4:4:4, and whatever else ComfyUI is asked to write.
+Added on the owner's instruction ("just assume we need it") before knowing which format, if
+any, his files use.
+
+- **Thumbnails and snapshots** through `MediaInfoBuilder…getFrame()` work on the emulator.
+- **Playback** through `FfmpegVideoRenderer` runs (the clock advances, no error) but draws
+  **solid green on the emulator — also for 8-bit clips forced through it** (tried with
+  `EXTENSION_RENDERER_MODE_PREFER`). That points at the emulator's handling of the YV12 window
+  buffers the renderer posts, not at the file, but it means the software-decoded picture has
+  never been seen correct. First thing to look at on a phone with a file hardware cannot play.
+- **Frame stepping** on such a file falls back to seeking the player (`FrameServer` needs a
+  `MediaCodec` decoder). A stepping fallback on `MediaInfo.getFrameAt` would not depend on the
+  surface; not built.
+- **GPL-3.0.** NextLib is GPL. Fine for a personal build; distributing the app means
+  distributing its source under a compatible licence. Dropping the two dependencies and the
+  three call sites removes it cleanly.
+
+### 6.3 The capture badge — FIXED 2026-11-10 (was: the "instant TextureView" path never fires)
+
+The badge is now a `PixelCopy` of the player's `SurfaceView`, or the stepped-to still when
+walking, and appears at once. The text below is kept for the history of why `findTextureView`
+never worked.
 
 `VideoPlayerView.kt` (`PlayerView(ctx)` factory and `findTextureView`)
 
@@ -708,8 +772,9 @@ frame.
 
 `MediaViewerScreen.kt` (action bar)
 
-Favorite and Delete are empty lambdas. `isFavorite` is hardcoded `false` and never read from
-`MediaStore.IS_FAVORITE`. **Share is implemented** (2026-10-02, second pass): `ACTION_SEND`
+**Delete works** (2026-11-10): it moves the item to Android's trash, with Undo — see
+`MediaTrash`. **Favorite is still an empty lambda**; `isFavorite` is hardcoded `false` and
+never read from `MediaStore.IS_FAVORITE`. **Share is implemented** (2026-10-02, second pass): `ACTION_SEND`
 with the item's MediaStore Uri through the system chooser. **Edit is implemented** (PR #2):
 stills only, saves a copy. Not covered: video trim, GIFs, overwrite-original, free rotation /
 straighten, aspect-*locked* crop dragging (presets only place the rectangle), and Ultra HDR
@@ -750,7 +815,11 @@ still held in memory on every change — that is by design for now (every screen
 the one list) — and the on-disk check of each path runs only for paths not seen in the last
 five minutes. Not re-measured on the Pixel since either change.
 
-### 6.5 Every video page still builds its own ExoPlayer — LOW (was MEDIUM)
+### 6.5 Every video page built its own ExoPlayer — FIXED 2026-11-10
+
+A page is now a poster until it has been the settled page for 150 ms, and only then composes
+`LiveVideoPlayer`, which owns the player and releases it when the page stops being settled.
+One player exists at a time (verified in logcat). What follows is the earlier state.
 
 `VideoPlayerView.kt`
 
@@ -915,7 +984,91 @@ Changing either of these back will break things silently, with no error:
 
 ---
 
+- **Do not flush a `MediaCodec` that has not produced anything yet.** A decoder gets its
+  setup data (the parameter sets) at `start()`; a `flush()` before the first output buffer or
+  format change throws it away, and the codec then takes input for ever and returns nothing.
+  `FrameServer.restartAt` flushes only a codec that has answered, leaves an untouched one alone,
+  and replaces one that was fed but stayed silent. Cost an hour as "Decoder stalled".
+- **A long-press drag on a lazy grid must claim its moves in the Initial pass.**
+  `detectDragGesturesAfterLongPress` on the grid's own modifier never gets going: the grid's
+  scrolling takes the gesture the moment the finger travels. `AlbumEntryGrid` and
+  `imageDragSelection` both wait for the long press themselves and then read
+  `awaitPointerEvent(PointerEventPass.Initial)`.
+- **`android.net.Uri` does not exist in plain unit tests**, so nothing that constructs an
+  `Album` or a `MediaItem` can be tested on the JVM. Keep the logic on ids and strings
+  (`arrangeTiles`, `VideoTimeline`, `originalName`) and map to the Android types at the edge.
+- **Frames-over-duration is not a frame rate.** The container's duration covers the audio and
+  a B-frame clip's edit list; Media3 reports 15.80 for a 16 fps ComfyUI clip. Read the frames'
+  own times (`VideoTimeline`).
+- **Emulator: the keyboard's first-run "Try out your stylus" sheet** covers a dialog the first
+  time a text field is focused and swallows `input text`. Tap the field, then type.
+
 ## 7. Changelog
+
+### 2026-11-10 — a frame decoder of our own; trash; album order and groups; a build for the phone
+
+Four branches, each on the one before: `video-engine`, `trash`, `album-order-groups`,
+`performance`. Emulator only.
+
+**What the owner reported.** Frame stepping "doesn't work" after pressing the timeline to the
+end of a paused video — he had to play and pause first. Playback "still funky". One day
+nothing loaded at all — no previews, no frames, no playback — until he **restarted the phone**
+(he suspects a file he had downloaded, perhaps a WebP; not reproduced, cause unknown — a phone
+restart fixing it points at a system media service, not at this app's process). He mostly
+watches clips made with ComfyUI.
+
+**What was found, with ComfyUI-style clips** (libx264 defaults: B-frames, one keyframe, 16/24/32
+fps, no audio — made with ffmpeg, in `Movies/Comfy` on the AVD):
+
+- `MediaMetadataRetriever.getFramesAtIndex` starts every run from the keyframe before it. With
+  one keyframe, a run near the end decodes the whole clip: 2.9–3.1 s per run of 8 on a
+  241-frame 1080×1920 clip, against nothing measurable near the start. Pausing pre-decoded the
+  frames around the pause, which hid it; a timeline press threw that away, so the first tap
+  after it paid in full. That is "play, pause, then it works".
+- The frame ↔ time arithmetic assumed a constant rate equal to frames over the container's
+  duration. Wrong at the end of anything variable-rate or with longer audio (eleven frames
+  wrong on the test clip), and the reason for "15.80 fps".
+- A walk begun before the player had finished a seek started from the frame the seek left.
+- Every composed video page constructed a player.
+- A file the decoders refuse failed silently three ways (gray tile, no playback, no stepping).
+
+**What changed.**
+- `FrameServer` (replaces `VideoFrameCache`): `MediaExtractor` + `MediaCodec` into a
+  `SurfaceTexture`, read back through GL at display size as ARGB_8888. Continues from where it
+  stopped; a restart keeps a window behind the target; a clip that fits the budget (1/40 of
+  RAM, 96–384 MB) is decoded whole in the background. A pass in flight is joined, not queued
+  behind, and is abandoned only if the user has moved well away from it.
+- `VideoTimeline`: every frame's presentation time and the keyframes, read once per video when
+  its page goes live. All index ↔ position mapping goes through it; `frameStepPositionMs`
+  survives only for files whose times cannot be read.
+- `VideoPlayerView` is a poster until live; `LiveVideoPlayer` holds the player. A drag on the
+  seek bar pre-decodes around where it lands, rests on the last frame when dragged to the end
+  (the video loops), and the bar's thumb updates every 33 ms while visible.
+- Player errors are shown. FFmpeg decoders stand behind the phone's own (§6.18).
+- Snapshots by exact frame time in µs; badge from `PixelCopy` or the still.
+- Thumbnail cut-off 512 → 1024 px: an album cover is 606 px on a Pixel 9 Pro XL and a
+  two-column cell 672, so both had been decoding originals.
+- `MediaTrash` + `TrashScreen`: MediaStore's trash (`IS_TRASHED`), direct with All files
+  access, by the system's consent dialog otherwise. Delete in the viewer, Trash in the
+  selection bar, a confirmation pill with Undo (at the top: the bottom of every screen is
+  controls). Deleting for good asks first.
+- `AlbumLayout`: the album list's order and groups, in its own DataStore file as plain text.
+  Seeded once from the old sort; the sort menu is now a one-off "arrange by". Long-press drag
+  on the list and inside a group; select-to-group, rename, ungroup, take out. No file moves.
+- `Library`: albums and per-album lists built with the library on `Dispatchers.Default`
+  instead of in composition by four different screens.
+- `daily` build type (see §2); `abiFilters` arm64-v8a + x86_64.
+
+**Not done / not known.**
+- Nothing ran on the Pixel. In particular: decode speed and memory of `FrameServer` on 4K60
+  HEVC, GL read-back on its GPU, HDR tone-mapping (`KEY_COLOR_TRANSFER_REQUEST`), rotated
+  phone footage (the surface transform should handle it; no rotated clip was tested).
+- FFmpeg playback picture (§6.18). Which format the owner's failing files are, if any.
+- The whole-phone failure. If it recurs: `adb logcat -d` *before* restarting is the only way
+  to learn what died.
+- Trash consent path without All files access; Favorite; dragging a tile *onto* another to
+  group (grouping is by selection).
+
 
 ### 2026-10-02 (second pass) — the snapshot bug at its root; Albums-only; controls rework; GIF tabs
 
@@ -1453,7 +1606,12 @@ Still unexercised on-device: the viewer, filmstrip sync, and video frame capture
 
 Roughly dependency-ordered. Good first tasks are marked ★.
 
-0. ★ **Measure frame stepping on the Pixel.** The 2026-09-21 rework took stepping off the
+00. ★ **Run the 2026-11-10 branches on the Pixel, on the `daily` build.** Watch for: stepping
+   at the end of his own ComfyUI clips (the point of the exercise); the `VideoWalk` log line
+   showing the player's time and the frame's time equal; whether a 4K clip steps smoothly and
+   how much memory the page holds; a file hardware cannot play, if he has one (§6.18 — is the
+   picture right, or green?); trash and album drag by thumb rather than by `adb`.
+0. *(superseded by 00 — `VideoFrameCache` is gone)* **Measure frame stepping on the Pixel.** The 2026-09-21 rework took stepping off the
    player's seek path entirely and is 3–4× faster on the AVD (§1), but the AVD decodes in
    software and the owner's footage is 4K60 HEVC, which nothing here has touched. Two things
    to watch on hardware: how long `VideoFrameCache.open` takes on a long clip (it runs on the

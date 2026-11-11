@@ -15,14 +15,18 @@ import com.onegallery.app.data.SortPreferencesRepository
 import com.onegallery.app.data.TrashedItem
 import com.onegallery.app.domain.AlbumLayout
 import com.onegallery.app.domain.AlbumSort
+import com.onegallery.app.domain.Library
 import com.onegallery.app.domain.MediaItem
 import com.onegallery.app.domain.MediaSort
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -43,9 +47,15 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     private val refreshRequests = MutableStateFlow(0)
 
-    val mediaItems: StateFlow<List<MediaItem>> = refreshRequests
+    /**
+     * The library with its albums and per-album lists already worked out, off the main thread.
+     * Screens read this; none of them filters or groups the whole library itself.
+     */
+    val library: StateFlow<Library> = refreshRequests
         .flatMapLatest { repository.observeMediaItems() }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyList())
+        .map { Library.of(it) }
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), Library.EMPTY)
 
     private val sortPreferencesRepository = SortPreferencesRepository(application)
 
@@ -89,7 +99,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     /**
      * Moves [items] into [destination]; [onDone] runs on the main thread with the tally.
      *
-     * Nothing here updates [mediaItems] directly: each move is a MediaStore update, the observer
+     * Nothing here updates [library] directly: each move is a MediaStore update, the observer
      * sees it, and the library re-queries — the same path a move made in another app takes.
      */
     fun move(items: List<MediaItem>, destination: MoveDestination, onDone: (MoveResult) -> Unit) {
@@ -105,7 +115,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     /**
      * Trashes or restores [uris]; [onDone] gets how many changed. Like [move], this never
-     * touches [mediaItems] itself: MediaStore changes, the observer sees it, the library
+     * touches [library] itself: MediaStore changes, the observer sees it, the library
      * re-queries.
      */
     fun setTrashed(uris: List<Uri>, trashed: Boolean, onDone: (Int) -> Unit) {

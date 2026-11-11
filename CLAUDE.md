@@ -47,19 +47,24 @@ This project reverse-engineers and ports the standout UX paradigms from Samsung 
 ```
 app/src/main/java/com/onegallery/app/
 ├── MainActivity.kt                   # Permission gate, ACTION_VIEW handling, grid/viewer switch
-├── GalleryViewModel.kt               # Owns the live MediaStore subscription (StateFlow)
+├── GalleryViewModel.kt               # Owns the live library, trash and album-layout state
 ├── data/
-│   └── MediaStoreRepository.kt       # Paged (id-keyed) MediaStore read, live observer, snapshot/edit writes
+│   ├── MediaStoreRepository.kt       # Paged (id-keyed) MediaStore read, live observer, snapshot/edit writes
+│   ├── MediaTrash.kt                 # Android's trash: trash / restore / delete for good / list
+│   └── AlbumLayoutRepository.kt      # Saves the album list's arrangement (DataStore)
 ├── domain/
-│   └── MediaItem.kt                  # Models: MediaItem, MediaType (Photo, Video, MotionPhoto), Album
+│   ├── MediaItem.kt                  # Models: MediaItem, MediaType (Photo, Video, MotionPhoto), Album
+│   ├── Library.kt                    # The library with albums and per-album lists pre-built
+│   └── AlbumLayout.kt                # Album order + groups, and every edit to them (pure)
 ├── ui/
 │   ├── filmstrip/
 │   │   └── FilmStripInfinityViewer.kt # Jetpack Compose implementation of magnifying scrubber
 │   ├── video/
-│   │   ├── VideoPlayerView.kt         # Media3 ExoPlayer, two-row ghost controls, snapshot shutter
+│   │   ├── VideoPlayerView.kt         # Poster until live; then ExoPlayer, ghost controls, shutter
 │   │   ├── GhostVideoControls.kt      # Ghost buttons and the jog bar (step buttons on its ends)
-│   │   ├── VideoFrameCache.kt         # Frames decoded in runs, walked by index while stepping
-│   │   └── VideoSnapshotManager.kt    # Dual-path frame extraction and EXIF background saver
+│   │   ├── FrameServer.kt             # Own MediaCodec decoder: frames by index, kept around the user
+│   │   ├── VideoTimeline.kt           # Every frame's real presentation time (pure)
+│   │   └── VideoSnapshotManager.kt    # Saves the frame on screen at full resolution, with EXIF
 │   ├── viewer/
 │   │   ├── MediaViewerScreen.kt       # Fullscreen zoomable pager synchronized with FilmStrip
 │   │   ├── MediaDetailsSheet.kt       # One UI swipe-up EXIF and technical info sheet
@@ -73,7 +78,10 @@ app/src/main/java/com/onegallery/app/
 │   │   └── MediaImageRequests.kt      # Shared Coil requests (thumbnail stand-in / full-size)
 │   ├── gif/                          # GIF creator (tabs: Frames, Playback, Crop, Size)
 │   ├── grid/
-│   │   └── GalleryGridScreen.kt       # Album list -> album grid (the app starts here; no tabs)
+│   │   ├── GalleryGridScreen.kt       # Album list -> group -> album grid (the app starts here; no tabs)
+│   │   └── AlbumTiles.kt              # Album/group tiles, long-press drag to rearrange
+│   ├── trash/
+│   │   └── TrashScreen.kt             # What is in the trash; restore or delete for good
 │   └── theme/
 │       ├── Color.kt                   # One UI color palette (AMOLED dark / light)
 │       └── Theme.kt                   # Squircle cards, rounded bottom sheets
@@ -87,6 +95,9 @@ app/src/main/java/com/onegallery/app/
 # Build debug APK
 ./gradlew assembleDebug
 
+# Build the optimised APK for everyday use on a phone (R8, debug-signed)
+./gradlew assembleDaily
+
 # Install to connected Pixel via ADB
-adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb install -r app/build/outputs/apk/daily/app-daily.apk
 ```

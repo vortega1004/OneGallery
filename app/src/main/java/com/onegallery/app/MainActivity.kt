@@ -69,13 +69,10 @@ import androidx.lifecycle.viewmodel.compose.viewModel as composeViewModel
 import com.onegallery.app.ui.gif.GifCreatorScreen
 import com.onegallery.app.ui.gif.GifCreatorViewModel
 import kotlinx.coroutines.launch
-import com.onegallery.app.domain.forAlbum
-import com.onegallery.app.domain.sortedBy
 import com.onegallery.app.data.MoveDestination
 import com.onegallery.app.data.MoveResult
 import com.onegallery.app.data.canMoveAnywhere
 import com.onegallery.app.domain.MediaItem
-import com.onegallery.app.domain.toAlbums
 import com.onegallery.app.ui.grid.GalleryGridScreen
 import com.onegallery.app.ui.move.MoveToAlbumSheet
 import com.onegallery.app.ui.trash.TrashScreen
@@ -217,7 +214,8 @@ class MainActivity : ComponentActivity() {
  */
 @Composable
 fun GalleryApp(viewModel: GalleryViewModel, messages: SnackbarHostState) {
-    val mediaItems by viewModel.mediaItems.collectAsStateWithLifecycle()
+    val library by viewModel.library.collectAsStateWithLifecycle()
+    val mediaItems = library.items
     var selectedItemIndex by rememberSaveable { mutableIntStateOf(-1) }
     var selectionMode by rememberSaveable { mutableStateOf(false) }
     var selectedImageIds by rememberSaveable { mutableStateOf(longArrayOf()) }
@@ -263,8 +261,8 @@ fun GalleryApp(viewModel: GalleryViewModel, messages: SnackbarHostState) {
     // Sorted by the *viewer's* album, which is the album the grid was showing when the photo
     // was tapped. Reading `mediaSort` here would be wrong the moment the two differ.
     val viewerMediaSort = sortPreferences.mediaSortFor(viewerAlbumId)
-    val viewerItems = remember(mediaItems, viewerAlbumId, viewerMediaSort) {
-        mediaItems.forAlbum(viewerAlbumId).sortedBy(viewerMediaSort)
+    val viewerItems = remember(library, viewerAlbumId, viewerMediaSort) {
+        library.album(viewerAlbumId, viewerMediaSort)
     }
 
     val closeViewer = {
@@ -365,7 +363,7 @@ fun GalleryApp(viewModel: GalleryViewModel, messages: SnackbarHostState) {
     if (!moveItems.isNullOrEmpty()) {
         MoveToAlbumSheet(
             items = moveItems,
-            albums = remember(mediaItems) { mediaItems.toAlbums() },
+            albums = library.albums,
             onMove = { destination ->
                 moveIds = null
                 if (canMoveAnywhere()) {
@@ -449,7 +447,7 @@ fun GalleryApp(viewModel: GalleryViewModel, messages: SnackbarHostState) {
             )
         } else {
             GalleryGridScreen(
-                mediaItems = mediaItems,
+                library = library,
                 openedAlbumId = openedAlbumId,
                 onOpenAlbum = { albumId ->
                     // One LazyGridState serves every album, so without this a folder opens at

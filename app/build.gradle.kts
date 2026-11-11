@@ -37,6 +37,16 @@ android {
         debug {
             isMinifyEnabled = false
         }
+        // The build to put on a phone for everyday use: optimised like `release`, signed with
+        // the debug key so it installs without a keystore of its own (and over a debug build
+        // without losing data). A debug build is debuggable, which switches off most of ART's
+        // optimisations — Compose in particular is several times slower in it.
+        //   ./gradlew assembleDaily  ->  app/build/outputs/apk/daily/app-daily.apk
+        create("daily") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += "release"
+        }
     }
 
     compileOptions {

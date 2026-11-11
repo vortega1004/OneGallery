@@ -85,10 +85,9 @@ import com.onegallery.app.domain.ungrouping
 import com.onegallery.app.domain.withGroupOrder
 import com.onegallery.app.domain.withOrder
 import com.onegallery.app.domain.MediaSort
-import com.onegallery.app.domain.forAlbum
+import com.onegallery.app.domain.Library
 import com.onegallery.app.domain.sortedBy
 import com.onegallery.app.domain.MediaItem
-import com.onegallery.app.domain.toAlbums
 import com.onegallery.app.ui.theme.DarkBackground
 import com.onegallery.app.ui.theme.DarkSurface
 import com.onegallery.app.ui.theme.DarkTextPrimary
@@ -116,7 +115,7 @@ import com.onegallery.app.ui.gif.selectionBetween
  */
 @Composable
 fun GalleryGridScreen(
-    mediaItems: List<MediaItem>,
+    library: Library,
     openedAlbumId: String?,
     onOpenAlbum: (String?) -> Unit,
     columnCount: Int,
@@ -145,8 +144,9 @@ fun GalleryGridScreen(
     onOpenTrash: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    // Derived from the list already in memory — no second MediaStore query.
-    val albums = remember(mediaItems) { mediaItems.toAlbums() }
+    // Worked out with the library itself, off the main thread — see Library.
+    val mediaItems = library.items
+    val albums = library.albums
     val openedAlbum = remember(albums, openedAlbumId) {
         albums.firstOrNull { it.id == openedAlbumId }
     }
@@ -186,8 +186,8 @@ fun GalleryGridScreen(
     var namingGroup by remember { mutableStateOf<GroupNaming?>(null) }
     // Everything is selectable: selection serves moving as well as GIFs. The GIF creator takes
     // the stills out of it and ignores the rest.
-    val selectableItems = remember(mediaItems, openedAlbumId, mediaSort) {
-        mediaItems.forAlbum(openedAlbumId).sortedBy(mediaSort)
+    val selectableItems = remember(library, openedAlbumId, mediaSort) {
+        library.album(openedAlbumId, mediaSort)
     }
     val selectedItems = selectableItems.filter { it.id in selectedImageIds }
     val gifFrames = selectedItems.filter { it.canBeGifFrame }
@@ -309,8 +309,8 @@ fun GalleryGridScreen(
                         // already null and the grid would flash empty.
                         // Same expression the viewer uses to build its pager list — see
                         // MediaItem.forAlbum.
-                        val albumItems = remember(mediaItems, album.id, mediaSort) {
-                            mediaItems.forAlbum(album.id).sortedBy(mediaSort)
+                        val albumItems = remember(library, album.id, mediaSort) {
+                            library.album(album.id, mediaSort)
                         }
                         if (selectionMode) SelectionHeader(selectedItems.size, clearSelection) else OneUIHeader(
                             title = album.name,
