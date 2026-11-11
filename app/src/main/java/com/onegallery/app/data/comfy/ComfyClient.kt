@@ -3,6 +3,11 @@ package com.onegallery.app.data.comfy
 import org.json.JSONObject
 import java.io.InputStream
 import java.io.OutputStream
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.InetAddress
+import java.net.NetworkInterface
+import java.net.SocketTimeoutException
 import java.net.URL
 import java.security.MessageDigest
 import java.security.cert.CertificateException
@@ -21,8 +26,9 @@ import javax.net.ssl.X509TrustManager
  * any other. This is stricter than the usual check, not looser: no certificate authority in
  * the world can issue something this will accept.
  *
- * During pairing there is no pin yet. Then [pairingPrefix] — the half of the pairing code that
- * came from the certificate — must match the start of the fingerprint before anything is sent.
+ * During pairing there is no pin yet ([pairing] true): the certificate shown then is the one
+ * remembered — trust on first use, the price of a four-digit code. The gateway prints the
+ * fingerprint and the phone shows it, for anyone who wants to compare.
  *
  * Blocking. Call from a background dispatcher.
  */
@@ -30,7 +36,7 @@ class ComfyClient(
     private val address: String,
     private val pin: String?,
     private val token: String?,
-    private val pairingPrefix: String? = null
+    private val pairing: Boolean = false
 ) {
     /** The fingerprint of the certificate the gateway last presented. */
     @Volatile
@@ -44,10 +50,8 @@ class ComfyClient(
             when {
                 pin != null && !fingerprint.equals(pin, ignoreCase = true) ->
                     throw CertificateException("This is not the gateway the phone was paired with")
-                pin == null && pairingPrefix == null ->
+                pin == null && !pairing ->
                     throw CertificateException("Not paired")
-                pin == null && !fingerprint.startsWith(pairingPrefix!!, ignoreCase = true) ->
-                    throw CertificateException("The gateway's certificate does not match the pairing code")
             }
             seenFingerprint = fingerprint
         }
@@ -91,13 +95,13 @@ class ComfyClient(
         }
     }
 
-    /** Trades the one-time secret for this phone's token. Returns (device id, token, fingerprint). */
-    fun pair(secret: String, deviceName: String): Triple<String, String, String> {
+    /** Trades the four-digit code for this phone's token. Returns (device id, token, fingerprint). */
+    fun pair(code: String, deviceName: String): Triple<String, String, String> {
         val connection = open("/v1/pair", "POST")
         connection.doOutput = true
         connection.setRequestProperty("Content-Type", "application/json")
         connection.outputStream.use {
-            it.write(JSONObject().put("code", secret).put("device_name", deviceName).toString().toByteArray())
+            it.write(JSONObject().put("code", code).put("device_name", deviceName).toString().toByteArray())
         }
         val answer = connection.jsonOrThrow()
         val presented = seenFingerprint ?: throw CertificateException("No certificate seen")
@@ -120,7 +124,8 @@ class ComfyClient(
      */
     fun submit(
         workflowId: String,
-        prompt: String?,
+        params: String?,
+        loras: String?,
         image: InputStream?,
         imageName: String,
         idempotencyKey: String
@@ -133,7 +138,8 @@ class ComfyClient(
         connection.setRequestProperty("Idempotency-Key", idempotencyKey)
         connection.outputStream.use { out ->
             out.field(boundary, "workflow_id", workflowId)
-            if (!prompt.isNullOrBlank()) out.field(boundary, "prompt", prompt)
+            if (!params.isNullOrBlank()) out.field(boundary, "params", params)
+            if (!loras.isNullOrBlank()) out.field(boundary, "loras", loras)
             if (image != null) {
                 val safeName = imageName.filter { it.isLetterOrDigit() || it in "._-" }.ifEmpty { "photo" }
                 out.write(
@@ -170,6 +176,44 @@ class ComfyClient(
     }
 
     companion object {
+        /**
+         * Asks the local network, by UDP broadcast to the gateway's port, which gateways are
+         * there; collects the answers for [waitMs]. Blocking. Empty when nothing answered —
+         * a network that drops broadcasts (some guest Wi-Fi does) needs the address typed.
+         */
+        fun discover(waitMs: Int = 1500, port: Int = DEFAULT_GATEWAY_PORT): List<FoundGateway> {
+            val found = LinkedHashMap<String, FoundGateway>()
+            DatagramSocket().use { socket ->
+                socket.broadcast = true
+                socket.soTimeout = 300
+                val question = DISCOVERY_QUESTION.toByteArray()
+                val targets = LinkedHashSet<InetAddress>()
+                targets += InetAddress.getByName("255.255.255.255")
+                runCatching {
+                    NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
+                        .filter { it.isUp && !it.isLoopback }
+                        .flatMap { it.interfaceAddresses }
+                        .mapNotNullTo(targets) { it.broadcast }
+                }
+                for (target in targets) {
+                    runCatching { socket.send(DatagramPacket(question, question.size, target, port)) }
+                }
+                val buffer = ByteArray(2048)
+                val deadline = System.currentTimeMillis() + waitMs
+                while (System.currentTimeMillis() < deadline) {
+                    val packet = DatagramPacket(buffer, buffer.size)
+                    try {
+                        socket.receive(packet)
+                    } catch (_: SocketTimeoutException) {
+                        continue
+                    }
+                    val host = packet.address.hostAddress ?: continue
+                    parseDiscoveryAnswer(String(packet.data, 0, packet.length), host)?.let { found[it.address] = it }
+                }
+            }
+            return found.values.toList()
+        }
+
         /** SHA-256 of a certificate, as upper-case hex — the form the gateway prints. */
         fun fingerprintOf(encodedCertificate: ByteArray): String =
             MessageDigest.getInstance("SHA-256").digest(encodedCertificate)

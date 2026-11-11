@@ -88,7 +88,7 @@ def _report_folder(config: Config, data_dir: Path, info=None, detailed: bool = F
         params = workflow.params
         needs = ["photo" if workflow.requires_image else "no photo"]
         prompt = workflow.prompt
-        needs.append("prompt" if prompt is not None else "NO PROMPT FOUND")
+        needs.append("prompt" if prompt is not None else "no prompt")
         needs.append(f"{len(params)} settings")
         if workflow.analysis.lora_targets:
             folders = workflow.lora_folders()

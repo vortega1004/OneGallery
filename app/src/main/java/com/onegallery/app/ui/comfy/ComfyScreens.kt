@@ -12,7 +12,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -70,7 +70,11 @@ import com.onegallery.app.data.comfy.ComfyController
 import com.onegallery.app.data.comfy.ComfyJob
 import com.onegallery.app.data.comfy.ComfyJobStatus
 import com.onegallery.app.data.comfy.ComfyWorkflow
+import com.onegallery.app.data.comfy.ComfySettings
 import com.onegallery.app.data.comfy.ComfyWorkflowList
+import com.onegallery.app.data.comfy.FoundGateway
+import com.onegallery.app.data.comfy.PairingCode
+import com.onegallery.app.data.comfy.normaliseGatewayAddress
 import com.onegallery.app.domain.MediaItem
 import com.onegallery.app.ui.common.rememberThumbnailRequest
 import com.onegallery.app.ui.theme.DarkBackground
@@ -87,7 +91,7 @@ private val Warning = Color(0xFFFFB454)
 private val Failure = Color(0xFFFF6B6B)
 
 @Composable
-private fun fieldColors() = OutlinedTextFieldDefaults.colors(
+internal fun fieldColors() = OutlinedTextFieldDefaults.colors(
     focusedTextColor = DarkTextPrimary,
     unfocusedTextColor = DarkTextPrimary,
     focusedLabelColor = OneUIBlue,
@@ -121,8 +125,8 @@ private fun ScreenHeader(title: String, subtitle: String, onBack: () -> Unit) {
 /**
  * Where the phone is introduced to the gateway, and where that can be checked or undone.
  *
- * Pairing takes two things read off the computer: the gateway's address and a one-time code.
- * Nothing is sent until the code has been matched against the certificate the gateway presents.
+ * Pairing takes the gateway's address — found by asking the network, or typed — and the
+ * four-digit code the gateway prints in the ComfyUI window when it starts.
  */
 @Composable
 fun ComfyConnectionScreen(onClose: () -> Unit) {
@@ -137,8 +141,25 @@ fun ComfyConnectionScreen(onClose: () -> Unit) {
     var problem by remember { mutableStateOf<String?>(null) }
     var check by remember { mutableStateOf<Result<ComfyWorkflowList>?>(null) }
     var confirmForget by remember { mutableStateOf(false) }
+    var searching by remember { mutableStateOf(false) }
+    var found by remember { mutableStateOf<List<FoundGateway>?>(null) }
 
     BackHandler(onBack = onClose)
+
+    fun search() {
+        searching = true
+        scope.launch {
+            val answers = controller.discover()
+            found = answers
+            searching = false
+            // One gateway on the network: that is the one
+            if (answers.size == 1 && address.isBlank()) address = answers[0].address
+        }
+    }
+
+    LaunchedEffect(loaded, connection) {
+        if (loaded && connection == null && found == null) search()
+    }
 
     Column(
         modifier = Modifier
@@ -155,11 +176,46 @@ fun ComfyConnectionScreen(onClose: () -> Unit) {
 
                 paired == null -> {
                     Text(
-                        "On the computer that runs ComfyUI, start the OneGallery gateway, then run " +
-                            "\"start-gateway pair\". It shows an address and a pairing code.",
+                        "Start ComfyUI on the computer: the OneGallery gateway starts with it and shows a " +
+                            "four-digit pairing code in the ComfyUI window.",
                         color = DarkTextSecondary,
                         fontSize = 14.sp
                     )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(enabled = !searching, onClick = { search() }) {
+                            Text(if (searching) "Looking for the gateway…" else "Find gateway")
+                        }
+                        if (searching) CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+                    }
+                    found?.let { answers ->
+                        if (answers.isEmpty() && !searching) {
+                            Text(
+                                "No gateway answered on this network. Type its address: it is the \"Listening\" " +
+                                    "line in the ComfyUI window.",
+                                color = Warning,
+                                fontSize = 13.sp
+                            )
+                        }
+                        answers.forEach { gateway ->
+                            val picked = normaliseGatewayAddress(address) == gateway.address
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(if (picked) OneUIBlue.copy(alpha = 0.28f) else Color(0x14FFFFFF))
+                                    .border(1.dp, if (picked) OneUIBlue else Color.Transparent, RoundedCornerShape(14.dp))
+                                    .clickable { address = gateway.address; problem = null }
+                                    .padding(horizontal = 14.dp, vertical = 10.dp)
+                            ) {
+                                Text(gateway.name, color = DarkTextPrimary, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                                Text(
+                                    gateway.address + if (gateway.pairingOpen) " · ready to pair" else " · pairing is closed",
+                                    color = if (gateway.pairingOpen) DarkTextSecondary else Warning,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+                    }
                     OutlinedTextField(
                         value = address,
                         onValueChange = { address = it.trim(); problem = null },
@@ -172,21 +228,22 @@ fun ComfyConnectionScreen(onClose: () -> Unit) {
                     )
                     OutlinedTextField(
                         value = code,
-                        onValueChange = { code = it.uppercase().take(24); problem = null },
+                        onValueChange = { typed -> code = typed.filter(Char::isDigit).take(PairingCode.LENGTH); problem = null },
                         label = { Text("Pairing code") },
-                        placeholder = { Text("XXXX-XXXX-XXXXX-XXXXX") },
+                        placeholder = { Text("0000") },
                         singleLine = true,
-                        textStyle = androidx.compose.ui.text.TextStyle(fontFamily = FontFamily.Monospace, fontSize = 16.sp),
-                        keyboardOptions = KeyboardOptions(
-                            capitalization = KeyboardCapitalization.Characters,
-                            autoCorrectEnabled = false
+                        textStyle = androidx.compose.ui.text.TextStyle(
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 26.sp,
+                            letterSpacing = 8.sp
                         ),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, autoCorrectEnabled = false),
                         colors = fieldColors(),
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.width(180.dp)
                     )
                     problem?.let { Text(it, color = Failure, fontSize = 14.sp) }
                     Button(
-                        enabled = !working && address.isNotBlank() && code.isNotBlank(),
+                        enabled = !working && address.isNotBlank() && PairingCode.parse(code) != null,
                         onClick = {
                             working = true
                             scope.launch {
@@ -197,8 +254,9 @@ fun ComfyConnectionScreen(onClose: () -> Unit) {
                         }
                     ) { Text(if (working) "Pairing…" else "Pair") }
                     Text(
-                        "The phone only ever talks to the gateway, over an encrypted connection to the " +
-                            "one certificate it sees now. The code works once.",
+                        "The phone only ever talks to the gateway, encrypted, and from now on only to the " +
+                            "certificate it sees while pairing. The code works once; a new one comes with " +
+                            "every start of ComfyUI, or from pair.bat.",
                         color = DarkTextSecondary,
                         fontSize = 12.sp
                     )
@@ -220,6 +278,11 @@ fun ComfyConnectionScreen(onClose: () -> Unit) {
                             color = DarkTextSecondary,
                             fontSize = 12.sp,
                             fontFamily = FontFamily.Monospace
+                        )
+                        Text(
+                            "The same as the Certificate line in the ComfyUI window",
+                            color = DarkTextSecondary,
+                            fontSize = 11.sp
                         )
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -281,26 +344,36 @@ fun ComfyConnectionScreen(onClose: () -> Unit) {
 private fun jobCount(count: Int) = if (count == 1) "1 job" else "$count jobs"
 
 /**
- * The Share button's sheet: the jobs the gateway offers for [item], and Start.
+ * The Share button's sheet: the jobs the gateway offers for [item], their settings, and Start.
  *
- * One tap picks a job. A job that takes a prompt shows a text box with the workflow's own
- * prompt greyed out in it — leave it empty to use that, or type to replace it for this run.
+ * One tap picks a job; the list then folds to that job and its settings open beneath it —
+ * prompt (the workflow's own greyed out), seed (random or fixed), sampler settings, models
+ * and LoRAs, as the gateway found them in the workflow. What was set is remembered per job.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SendToComfySheet(item: MediaItem, onDismiss: () -> Unit) {
     val controller = ComfyController.get(LocalContext.current)
     val connection by controller.connection.collectAsStateWithLifecycle()
+    val jobs by controller.jobs.collectAsStateWithLifecycle()
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var showSetup by remember { mutableStateOf(false) }
     var attempt by remember { mutableIntStateOf(0) }
     var list by remember { mutableStateOf<Result<ComfyWorkflowList>?>(null) }
     var chosen by remember { mutableStateOf<ComfyWorkflow?>(null) }
-    var prompt by remember { mutableStateOf("") }
+    var settings by remember { mutableStateOf(ComfySettings()) }
+    var problem by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(connection, attempt) {
         list = null
         if (connection != null) list = controller.workflows()
+    }
+    LaunchedEffect(chosen?.id) {
+        val job = chosen ?: return@LaunchedEffect
+        val saved = controller.savedSettings(job.id)
+        // A LoRA that has left the folder since is not offered again
+        settings = saved.copy(loras = saved.loras.filter { it.name in job.loras.available })
+        problem = null
     }
 
     ModalBottomSheet(
@@ -312,6 +385,7 @@ fun SendToComfySheet(item: MediaItem, onDismiss: () -> Unit) {
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
+                .imePadding()
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -356,92 +430,53 @@ fun SendToComfySheet(item: MediaItem, onDismiss: () -> Unit) {
                     val workflows = loaded.getOrThrow()
                     // A video cannot go where a photo is asked for; those jobs are shown, greyed
                     val usable: (ComfyWorkflow) -> Boolean = { !it.requiresImage || !item.isVideo }
-                    if (!workflows.comfyReachable) {
-                        Text("The gateway is up, but ComfyUI is not answering on the computer.", color = Warning, fontSize = 13.sp)
-                    }
-                    if (workflows.workflows.isEmpty()) {
-                        Text(
-                            "The jobs folder is empty. Export a workflow from ComfyUI with Export (API) and put it there.",
-                            color = DarkTextSecondary,
-                            fontSize = 14.sp
-                        )
-                    }
+                    val job = chosen
                     Column(
                         modifier = Modifier
-                            .heightIn(max = 300.dp)
+                            .weight(1f, fill = false)
                             .verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        workflows.workflows.forEach { workflow ->
-                            val enabled = usable(workflow)
-                            val selected = chosen?.id == workflow.id
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(14.dp))
-                                    .background(if (selected) OneUIBlue.copy(alpha = 0.28f) else Color(0x14FFFFFF))
-                                    .border(1.dp, if (selected) OneUIBlue else Color.Transparent, RoundedCornerShape(14.dp))
-                                    .clickable(enabled = enabled) {
-                                        chosen = workflow
-                                        prompt = ""
-                                    }
-                                    .padding(horizontal = 14.dp, vertical = 10.dp)
-                            ) {
-                                Text(
-                                    workflow.name,
-                                    color = if (enabled) DarkTextPrimary else Color(0x61FFFFFF),
-                                    fontSize = 15.sp,
-                                    fontWeight = FontWeight.Medium
-                                )
-                                val note = when {
-                                    !enabled -> "Takes a photo, not a video"
-                                    else -> workflow.description
-                                }
-                                if (note.isNotEmpty()) {
-                                    Text(note, color = DarkTextSecondary, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                }
-                            }
+                        if (!workflows.comfyReachable) {
+                            Text("The gateway is up, but ComfyUI is not answering on the computer.", color = Warning, fontSize = 13.sp)
+                        }
+                        if (workflows.workflows.isEmpty()) {
+                            Text(
+                                "The jobs folder is empty. In ComfyUI use Workflow > Export (API) and save the file there.",
+                                color = DarkTextSecondary,
+                                fontSize = 14.sp
+                            )
+                        }
+                        val shown = if (job == null) workflows.workflows else listOf(job)
+                        shown.forEach { workflow ->
+                            JobChoice(
+                                workflow = workflow,
+                                enabled = usable(workflow),
+                                selected = job?.id == workflow.id,
+                                onClick = { chosen = if (job?.id == workflow.id) null else workflow }
+                            )
+                        }
+                        if (job != null) {
+                            ComfySettingsEditor(
+                                workflow = job,
+                                settings = settings,
+                                lastSeed = jobs.firstOrNull { it.workflowId == job.id && it.seed != null }?.seed,
+                                onChange = { settings = it; problem = null }
+                            )
                         }
                     }
-
-                    val job = chosen
-                    if (job != null && job.takesPrompt) {
-                        // The heading is outside the box on purpose. Material only shows a
-                        // placeholder under a floating label once the box has focus, and the
-                        // greyed-out prompt has to be readable before anything is tapped.
-                        Text("Prompt", color = DarkTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                        OutlinedTextField(
-                            value = prompt,
-                            onValueChange = { prompt = it.take(4000) },
-                            // The workflow's own prompt, greyed out: what runs if this is left empty
-                            placeholder = {
-                                Text(job.promptDefault.orEmpty().ifEmpty { "The workflow has no prompt of its own" })
-                            },
-                            supportingText = {
-                                Text(
-                                    if (job.promptDefault.isNullOrEmpty()) "Type what you want for this run"
-                                    else "Leave empty to use the workflow's own prompt",
-                                    color = DarkTextSecondary
-                                )
-                            },
-                            minLines = 2,
-                            maxLines = 5,
-                            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-                            colors = fieldColors(),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
+                    problem?.let { Text(it, color = Failure, fontSize = 13.sp) }
                     Button(
                         enabled = job != null,
                         onClick = {
                             if (job != null) {
-                                controller.send(
+                                problem = controller.send(
                                     item = item.takeIf { job.requiresImage },
                                     workflow = job,
-                                    prompt = prompt,
+                                    settings = settings,
                                     maxUploadBytes = workflows.maxUploadBytes
                                 )
-                                onDismiss()
+                                if (problem == null) onDismiss()
                             }
                         },
                         modifier = Modifier.fillMaxWidth()
@@ -458,6 +493,39 @@ fun SendToComfySheet(item: MediaItem, onDismiss: () -> Unit) {
         ) {
             ComfyConnectionScreen(onClose = { showSetup = false })
         }
+    }
+}
+
+@Composable
+private fun JobChoice(workflow: ComfyWorkflow, enabled: Boolean, selected: Boolean, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(if (selected) OneUIBlue.copy(alpha = 0.28f) else Color(0x14FFFFFF))
+            .border(1.dp, if (selected) OneUIBlue else Color.Transparent, RoundedCornerShape(14.dp))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                workflow.name,
+                color = if (enabled) DarkTextPrimary else Color(0x61FFFFFF),
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Medium
+            )
+            val note = when {
+                !enabled -> "Takes a photo, not a video"
+                workflow.description.isNotEmpty() -> workflow.description
+                !workflow.requiresImage -> "Does not use the photo"
+                else -> ""
+            }
+            if (note.isNotEmpty()) {
+                Text(note, color = DarkTextSecondary, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        if (selected) Text("Change", color = OneUIBlue, fontSize = 13.sp)
     }
 }
 
@@ -555,7 +623,7 @@ private fun JobRow(job: ComfyJob, time: String, onRetry: () -> Unit, onDismiss: 
                 ComfyJobStatus.FAILED -> (job.error ?: "Failed") to Failure
             }
             Text(label, color = color, fontSize = 13.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
-            Text(time, color = DarkTextSecondary, fontSize = 11.sp)
+            Text(time + (job.seed?.let { " · seed $it" } ?: ""), color = DarkTextSecondary, fontSize = 11.sp)
         }
         if (job.status == ComfyJobStatus.FAILED && job.canRetry) {
             IconButton(onClick = onRetry) { Icon(Icons.Rounded.Refresh, "Send again", tint = DarkTextPrimary) }

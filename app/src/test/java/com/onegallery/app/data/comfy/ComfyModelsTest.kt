@@ -10,18 +10,25 @@ import org.junit.Test
 /** What the phone understands of the gateway, checked against the gateway's real answers. */
 class ComfyModelsTest {
 
-    @Test fun `a pairing code is read however it is typed`() {
-        val expected = PairingCode("MS8EWTGX", "587BF0CDAA")
-        assertEquals(expected, PairingCode.parse("MS8E-WTGX-587BF-0CDAA"))
-        assertEquals(expected, PairingCode.parse(" ms8e wtgx 587bf 0cdaa "))
-        assertEquals(expected, PairingCode.parse("MS8EWTGX587BF0CDAA"))
+    @Test fun `a pairing code is four digits, however it is typed`() {
+        assertEquals("0427", PairingCode.parse("0427"))
+        assertEquals("0427", PairingCode.parse(" 04 27 "))
+        assertEquals("0427", PairingCode.parse("04-27"))
     }
 
-    @Test fun `a code of the wrong length or with a non-hex fingerprint half is refused`() {
-        assertNull(PairingCode.parse("MS8E-WTGX-587BF"))
-        assertNull(PairingCode.parse("MS8E-WTGX-587BF-0CDAAX"))
-        assertNull(PairingCode.parse("MS8E-WTGX-587BF-0CDAZ"))
+    @Test fun `anything else is not a pairing code`() {
+        assertNull(PairingCode.parse("427"))
+        assertNull(PairingCode.parse("04271"))
+        assertNull(PairingCode.parse("04a7"))
+        assertNull(PairingCode.parse("٠٤٢٧")) // digits of another script are not what the gateway printed
         assertNull(PairingCode.parse(""))
+    }
+
+    @Test fun `a gateway's discovery answer becomes an address to pair with`() {
+        val found = parseDiscoveryAnswer("""{"service":"onegallery-gateway","name":"STUDIO","port":8443,"pairing":true}""", "192.168.3.77")
+        assertEquals(FoundGateway("STUDIO", "https://192.168.3.77:8443", true), found)
+        assertNull(parseDiscoveryAnswer("""{"service":"something-else"}""", "192.168.3.77"))
+        assertNull(parseDiscoveryAnswer("not json", "192.168.3.77"))
     }
 
     @Test fun `an address gets https and the usual port when they are left off`() {
@@ -66,6 +73,88 @@ class ComfyModelsTest {
         assertTrue(list.workflows.single().takesPrompt)
     }
 
+    /** What the gateway sends for Qwen Image 2.1, trimmed to a few settings of each kind. */
+    private val qwen = parseWorkflowList(
+        JSONObject(
+            """{"workflows": [{"id": "qwen", "name": "Qwen 2.1", "requires_image": false,
+                "prompt": {"editable": true, "default": "a lighthouse"},
+                "params": [
+                  {"id": "prompt", "kind": "text", "label": "Prompt", "group": "prompt", "default": "a lighthouse", "multiline": true},
+                  {"id": "negative", "kind": "text", "label": "Negative prompt", "group": "prompt", "default": ""},
+                  {"id": "seed", "kind": "seed", "label": "Seed", "group": "settings", "default": 447606998181262, "min": 0, "mode": "random"},
+                  {"id": "steps", "kind": "int", "label": "Steps", "group": "settings", "default": 25, "min": 1, "max": 10000},
+                  {"id": "cfg", "kind": "float", "label": "CFG", "group": "settings", "default": 1, "min": 0.0, "max": 100.0, "step": 0.1},
+                  {"id": "sampler_name", "kind": "choice", "label": "Sampler", "group": "settings", "default": "euler", "choices": ["euler", "res_multistep"]},
+                  {"id": "enable_lightning", "kind": "bool", "label": "Enable Lightning LoRA", "group": "settings", "default": false},
+                  {"id": "unet_name", "kind": "choice", "label": "Diffusion model", "group": "models", "default": "qwen.safetensors", "choices": ["qwen.safetensors"]},
+                  {"id": "future", "kind": "colour", "label": "Something new", "group": "settings", "default": "#fff"}],
+                "loras": {"can_add": true, "folders": ["qwen"], "available": ["qwen\\sketch.safetensors"],
+                          "targets": [{"id": "m1", "label": "qwen_image_2.1"}]}}]}"""
+        )
+    ).workflows.single()
+
+    @Test fun `settings are read with their kinds, defaults and ranges`() {
+        assertEquals(listOf("prompt", "negative", "seed", "steps", "cfg", "sampler_name", "enable_lightning", "unet_name"), qwen.params.map { it.id })
+        assertEquals("a lighthouse", qwen.promptDefault)
+        val steps = qwen.params.first { it.id == "steps" }
+        assertEquals(Triple(ComfyParamKind.INT, 25L, 1.0), Triple(steps.kind, steps.default, steps.min))
+        assertEquals("1", qwen.params.first { it.id == "cfg" }.defaultText)
+        assertEquals(447606998181262L, qwen.params.first { it.id == "seed" }.default)
+        assertTrue(qwen.params.first { it.id == "seed" }.randomByDefault)
+        assertEquals(listOf("euler", "res_multistep"), qwen.params.first { it.id == "sampler_name" }.choices)
+        assertEquals(ComfyLoraOptions(true, listOf("qwen"), listOf("qwen\\sketch.safetensors"), listOf("m1" to "qwen_image_2.1")), qwen.loras)
+    }
+
+    @Test fun `only what was changed is sent, as the gateway wants it`() {
+        val settings = ComfySettings(
+            values = mapOf("prompt" to "a red bicycle", "negative" to "  ", "steps" to "30", "cfg" to "2,5",
+                "sampler_name" to "res_multistep", "enable_lightning" to "true", "seed" to "77"),
+            seedFixed = true,
+            loras = listOf(ComfyLoraChoice("qwen\\sketch.safetensors", 0.6, "m1"))
+        )
+        val (params, loras) = settings.toRequest(qwen.params).getOrThrow()
+        assertEquals("a red bicycle", params.getString("prompt"))
+        assertFalse(params.has("negative")) // blank: the workflow's own
+        assertEquals(30L, params.getLong("steps"))
+        assertEquals(2.5, params.getDouble("cfg"), 0.0)
+        assertEquals("res_multistep", params.getString("sampler_name"))
+        assertTrue(params.getBoolean("enable_lightning"))
+        assertEquals("fixed", params.getJSONObject("seed").getString("mode"))
+        assertEquals(77L, params.getJSONObject("seed").getLong("value"))
+        assertFalse(params.has("unet_name"))
+        assertEquals("qwen\\sketch.safetensors", loras.getJSONObject(0).getString("name"))
+        assertEquals("m1", loras.getJSONObject(0).getString("target"))
+    }
+
+    @Test fun `nothing changed sends nothing, and random is said only when chosen`() {
+        assertEquals(0, ComfySettings().toRequest(qwen.params).getOrThrow().first.length())
+        val random = ComfySettings(seedFixed = false).toRequest(qwen.params).getOrThrow().first
+        assertEquals("random", random.getJSONObject("seed").getString("mode"))
+    }
+
+    @Test fun `numbers that are not, or out of range, are named before anything is sent`() {
+        val failed = ComfySettings(values = mapOf("steps" to "0", "cfg" to "lots"), seedFixed = true)
+            .toRequest(qwen.params.map { if (it.id == "seed") it.copy(default = null) else it })
+        val message = failed.exceptionOrNull()!!.message!!
+        assertTrue(message, "Steps has to be at least 1" in message)
+        assertTrue(message, "CFG has to be a number" in message)
+        assertTrue(message, "seed" in message)
+        assertTrue(ComfySettings(values = mapOf("steps" to "2.5")).toRequest(qwen.params).isFailure)
+    }
+
+    @Test fun `settings are kept per workflow and survive being saved`() {
+        val settings = ComfySettings(mapOf("cfg" to "3.5", "prompt" to "line one\n\"two\""), true, listOf(ComfyLoraChoice("a/b.safetensors", -0.5, null)))
+        assertEquals(settings, decodeSettings(encodeSettings(settings)))
+        assertEquals(ComfySettings(), decodeSettings(null))
+        assertEquals(ComfySettings(), decodeSettings("not json"))
+    }
+
+    @Test fun `a lora is shown by its file name, its folder beneath`() {
+        assertEquals("wan/high", loraFolder("wan\\high\\orbit cam.safetensors"))
+        assertEquals("orbit cam", loraTitle("wan\\high\\orbit cam.safetensors"))
+        assertEquals("", loraFolder("top.safetensors"))
+    }
+
     @Test fun `a finished job carries its results, images and videos`() {
         val job = parseRemoteJob(
             JSONObject(
@@ -75,6 +164,8 @@ class ComfyModelsTest {
             )
         )
         assertEquals(ComfyJobStatus.COMPLETED, job.status)
+        assertNull(job.seed)
+        assertEquals(42L, parseRemoteJob(JSONObject("""{"status": "running", "seed": 42}""")).seed)
         assertEquals(listOf(false, true), job.outputs.map { it.isVideo })
         assertEquals("/v1/jobs/j1/outputs/o1", job.outputs[1].downloadPath)
     }
@@ -107,7 +198,8 @@ class ComfyModelsTest {
             ComfyJob(
                 localId = "a", jobId = "j1", workflowId = "echo", workflowName = "Echo test",
                 status = ComfyJobStatus.COMPLETED, createdMs = 5, sourceUri = "content://media/1",
-                prompt = "line one\nline \"two\"", savedUris = listOf("content://media/9"), canRetry = false
+                prompt = "line one\nline \"two\"", savedUris = listOf("content://media/9"), canRetry = false,
+                paramsJson = """{"prompt":"x","seed":{"mode":"random"}}""", lorasJson = "[]", seed = 123456789
             ),
             ComfyJob(
                 localId = "b", workflowId = "x", workflowName = "X", status = ComfyJobStatus.FAILED,
