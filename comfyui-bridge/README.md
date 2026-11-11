@@ -58,7 +58,7 @@ Nothing else in a workflow is ever changed, and the phone cannot send a workflow
 |---|---|---|
 | `comfy_url` | `http://127.0.0.1:8188` | Where ComfyUI is |
 | `host`, `port` | `0.0.0.0`, `8443` | Where the gateway listens |
-| `workflows_dir` | `../workflows` | The jobs folder (relative to `data/`, or absolute) |
+| `workflows_dir` | `../../workflows` | The jobs folder: relative to `gateway/data/`, or an absolute path. The default is the `workflows` folder beside `gateway` |
 | `max_upload_bytes` | 20 MB | Largest photo accepted |
 | `max_image_side` | 8192 | Largest photo side, in pixels |
 | `max_active_jobs` | 4 | Jobs waiting or running at once, all phones together |

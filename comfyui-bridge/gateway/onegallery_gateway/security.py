@@ -42,8 +42,9 @@ class Config:
     comfy_url: str = "http://127.0.0.1:8188"
     host: str = "0.0.0.0"
     port: int = 8443
-    #: The jobs folder. Relative paths are taken from the folder holding config.json.
-    workflows_dir: str = "../workflows"
+    #: The jobs folder. Relative paths are taken from the folder holding config.json, which is
+    #: gateway/data - so this default is the `workflows` folder beside `gateway`.
+    workflows_dir: str = "../../workflows"
     max_upload_bytes: int = 20 * 1024 * 1024
     #: Longest side, in pixels, of a photo the gateway will pass on.
     max_image_side: int = 8192
