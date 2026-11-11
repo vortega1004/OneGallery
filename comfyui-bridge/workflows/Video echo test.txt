@@ -1,0 +1,1 @@
+Sends the photo back as a two-second video. Proves video results reach the phone.

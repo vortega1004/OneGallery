@@ -1,6 +1,5 @@
 package com.onegallery.app.ui.viewer
 
-import android.content.Intent
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -30,10 +29,11 @@ import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -69,10 +69,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -84,6 +85,7 @@ import com.onegallery.app.domain.MediaType
 import com.onegallery.app.domain.shortDisplayName
 import com.onegallery.app.ui.common.rememberFullSizeRequest
 import com.onegallery.app.ui.common.rememberThumbnailRequest
+import com.onegallery.app.ui.comfy.SendToComfySheet
 import com.onegallery.app.ui.common.swallowTaps
 import com.onegallery.app.ui.editor.PhotoEditorScreen
 import com.onegallery.app.ui.filmstrip.FilmStripHeight
@@ -109,7 +111,8 @@ fun MediaViewerScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
     onVisibleItemChange: (Long) -> Unit = {},
-    onMoveRequest: (MediaItem) -> Unit = {}
+    onMoveRequest: (MediaItem) -> Unit = {},
+    onTrashRequest: (MediaItem) -> Unit = {}
 ) {
     if (mediaItems.isEmpty()) return
 
@@ -120,13 +123,10 @@ fun MediaViewerScreen(
     val coroutineScope = rememberCoroutineScope()
     var isOverlayVisible by remember { mutableStateOf(true) }
     var showDetailsSheet by remember { mutableStateOf(false) }
-    // Walking a video frame by frame is looking closely at the picture, and the top bar covers
-    // the top of it. So it steps aside for the walk and comes back with the rest of the chrome:
-    // on play, on the next tap that brings the controls up, or on another item.
-    var topBarSuppressed by remember { mutableStateOf(false) }
     // The top bar shows only the tail of the file name; tapping it spells the whole name out
     var showFullName by remember { mutableStateOf(false) }
-    val context = LocalContext.current
+    // The item the Send to ComfyUI sheet is open for, if it is open
+    var comfyItem by remember { mutableStateOf<MediaItem?>(null) }
     // Videos autoplay, so they start silent. Held here rather than in the player so unmuting
     // once carries across every video in this viewer session.
     var isVideoMuted by rememberSaveable { mutableStateOf(true) }
@@ -177,10 +177,7 @@ fun MediaViewerScreen(
     // Keep the caller told which item is showing, so backing out can land the grid here even
     // if the user paged or scrubbed far from where they entered.
     LaunchedEffect(currentItem.id) { onVisibleItemChange(currentItem.id) }
-    LaunchedEffect(shownId) {
-        topBarSuppressed = false
-        showFullName = false
-    }
+    LaunchedEffect(shownId) { showFullName = false }
 
     // The picture area never changes size. The bottom band belongs to the chrome whether the
     // chrome is on screen or not, so showing and hiding it slides a bar over a layout that has
@@ -191,6 +188,11 @@ fun MediaViewerScreen(
     // first layout pass, which would put a jump right where the viewer opens.
     val reservedBottom = FilmStripHeight + ViewerActionRowHeight +
         WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    // The same at the top: the status bar plus a thin bar of our own, and the picture starts
+    // under both. The bar used to lie *over* the top of the picture and slide down across it
+    // every time the chrome came back — on every filmstrip scrub after a frame walk.
+    val reservedTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() +
+        ViewerTopBarHeight
 
     val dateFormat = remember { SimpleDateFormat("MMM d, yyyy", Locale.getDefault()) }
     val timeFormat = remember { SimpleDateFormat("h:mm a", Locale.getDefault()) }
@@ -204,7 +206,7 @@ fun MediaViewerScreen(
             state = pagerState,
             modifier = Modifier
                 .fillMaxSize()
-                .padding(bottom = reservedBottom),
+                .padding(top = reservedTop, bottom = reservedBottom),
             key = { index -> mediaItems[index].id }
         ) { pageIndex ->
             val item = mediaItems[pageIndex]
@@ -221,12 +223,7 @@ fun MediaViewerScreen(
                         .swipeUpToReveal { showDetailsSheet = true },
                     isActivePage = isActivePage,
                     controlsVisible = isOverlayVisible,
-                    onControlsVisibleChange = {
-                        isOverlayVisible = it
-                        // Asking for the chrome back means all of it
-                        if (it) topBarSuppressed = false
-                    },
-                    onFrameWalkChange = { walking -> if (isActivePage) topBarSuppressed = walking },
+                    onControlsVisibleChange = { isOverlayVisible = it },
                     // Zero: the page already ends above the bottom bar, so the player's controls
                     // only need their own margin from the edge of the page
                     controlsPadding = PaddingValues(0.dp),
@@ -244,79 +241,67 @@ fun MediaViewerScreen(
             }
         }
 
-        // Top Overlay Bar (Samsung style date/time header + action icons)
+        // Top bar: one thin row in a band of its own above the picture (see reservedTop), so it
+        // never covers the image. It fades with the rest of the chrome instead of sliding down
+        // over the picture, and since it covers nothing it no longer steps aside for frame walks.
         AnimatedVisibility(
-            visible = isOverlayVisible && !topBarSuppressed,
-            enter = fadeIn() + slideInVertically { -it },
-            exit = fadeOut() + slideOutVertically { -it },
+            visible = isOverlayVisible,
+            enter = fadeIn(),
+            exit = fadeOut(),
             modifier = Modifier.align(Alignment.TopCenter)
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(Color(0x99000000))
-                    // Overlays the picture, so it has to stop taps itself: this bar covers the
-                    // top of the photo and every dp of it used to toggle the chrome off again.
                     .swallowTaps()
                     .statusBarsPadding()
-                    .padding(top = 2.dp, bottom = 4.dp, start = 8.dp, end = 8.dp)
             ) {
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(ViewerTopBarHeight)
+                        .padding(horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     Row(
                         modifier = Modifier.weight(1f),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        IconButton(onClick = onBack) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
-                                contentDescription = "Back",
-                                tint = Color.White
-                            )
-                        }
+                        TopBarIcon(Icons.AutoMirrored.Rounded.ArrowBack, "Back", onBack)
 
-                        Column(modifier = Modifier.padding(start = 4.dp)) {
-                            val formattedDate = dateFormat.format(Date(currentItem.dateTaken))
-                            val formattedTime = timeFormat.format(Date(currentItem.dateTaken))
-
-                            Text(
-                                text = formattedDate,
-                                color = Color.White,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Text(
-                                text = formattedTime,
-                                color = Color.LightGray,
-                                fontSize = 11.sp
-                            )
-                        }
+                        // Date and time on one line: two stacked lines do not fit a bar this thin
+                        val takenAt = Date(currentItem.dateTaken)
+                        Text(
+                            text = "${dateFormat.format(takenAt)} · ${timeFormat.format(takenAt)}",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier.padding(start = 2.dp)
+                        )
 
                         // The tail of the file name: enough to tell two takes apart, short
-                        // enough to stay out of the way. Up here rather than beside the video
-                        // controls, where it sat under the thumb working them.
+                        // enough to stay out of the way. Tap for the whole name.
                         Box(
                             modifier = Modifier
                                 // Shrinks before it pushes the buttons on the right off the bar
                                 .weight(1f, fill = false)
-                                .padding(start = 12.dp)
-                                .heightIn(min = 36.dp)
-                                .background(Color(0x26FFFFFF), RoundedCornerShape(18.dp))
+                                .padding(start = 10.dp)
+                                .height(ViewerTopBarHeight - 4.dp)
+                                .background(Color(0x26FFFFFF), RoundedCornerShape(10.dp))
                                 .clickable(
                                     interactionSource = remember { MutableInteractionSource() },
                                     indication = null,
                                     onClickLabel = "Show the full file name"
                                 ) { showFullName = !showFullName }
-                                .padding(horizontal = 12.dp),
+                                .padding(horizontal = 8.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
                                 text = shortDisplayName(currentItem.displayName),
                                 color = Color.White,
-                                fontSize = 12.sp,
+                                fontSize = 11.sp,
                                 maxLines = 1,
                                 softWrap = false,
                                 overflow = TextOverflow.Ellipsis
@@ -324,36 +309,23 @@ fun MediaViewerScreen(
                         }
                     }
 
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = { showDetailsSheet = true }) {
-                            Icon(
-                                imageVector = Icons.Rounded.Info,
-                                contentDescription = "Details",
-                                tint = Color.White
+                    TopBarIcon(Icons.Rounded.Info, "Details") { showDetailsSheet = true }
+                    Box {
+                        var menuOpen by remember { mutableStateOf(false) }
+                        TopBarIcon(Icons.Rounded.MoreVert, "More") { menuOpen = true }
+                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Move to album") },
+                                onClick = {
+                                    menuOpen = false
+                                    onMoveRequest(currentItem)
+                                }
                             )
-                        }
-                        Box {
-                            var menuOpen by remember { mutableStateOf(false) }
-                            IconButton(onClick = { menuOpen = true }) {
-                                Icon(
-                                    imageVector = Icons.Rounded.MoreVert,
-                                    contentDescription = "More",
-                                    tint = Color.White
-                                )
-                            }
-                            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                                DropdownMenuItem(
-                                    text = { Text("Move to album") },
-                                    onClick = {
-                                        menuOpen = false
-                                        onMoveRequest(currentItem)
-                                    }
-                                )
-                            }
                         }
                     }
                 }
 
+                // Asked for, so it may cover the top of the picture until tapped away
                 if (showFullName) {
                     Text(
                         text = currentItem.displayName,
@@ -361,6 +333,7 @@ fun MediaViewerScreen(
                         fontSize = 12.sp,
                         modifier = Modifier
                             .fillMaxWidth()
+                            .background(Color(0xCC000000))
                             .clickable(
                                 interactionSource = remember { MutableInteractionSource() },
                                 indication = null,
@@ -422,11 +395,15 @@ fun MediaViewerScreen(
                     horizontalArrangement = Arrangement.SpaceAround,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    IconButton(onClick = { /* Delete confirmation */ }) {
+                    // Straight to the trash, no question asked: it can be undone from the
+                    // message that follows and for thirty days from the trash itself. An item
+                    // another app handed us is not in the library and is not ours to remove.
+                    val canTrash = currentItem.id >= 0
+                    IconButton(enabled = canTrash, onClick = { onTrashRequest(currentItem) }) {
                         Icon(
                             imageVector = Icons.Rounded.Delete,
-                            contentDescription = "Delete",
-                            tint = Color.White
+                            contentDescription = "Move to trash",
+                            tint = if (canTrash) Color.White else Color(0x61FFFFFF)
                         )
                     }
                     IconButton(onClick = { /* Toggle favorite */ }) {
@@ -452,20 +429,13 @@ fun MediaViewerScreen(
                             tint = if (canEdit) Color.White else Color(0x61FFFFFF)
                         )
                     }
-                    IconButton(
-                        onClick = {
-                            val send = Intent(Intent.ACTION_SEND).apply {
-                                type = currentItem.mimeType
-                                putExtra(Intent.EXTRA_STREAM, currentItem.uri)
-                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                            }
-                            // An item opened from another app may not be ours to pass on
-                            runCatching { context.startActivity(Intent.createChooser(send, null)) }
-                        }
+                    // Share means "send to ComfyUI" here, and only that: the owner sends photos
+                    // to his own workflows, not to other apps. The sheet lists the gateway's jobs.
+                    IconButton(onClick = { comfyItem = currentItem }
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.Share,
-                            contentDescription = "Share",
+                            contentDescription = "Send to ComfyUI",
                             tint = Color.White
                         )
                     }
@@ -487,6 +457,10 @@ fun MediaViewerScreen(
                     onSaved = { isEditorOpen = false }
                 )
             }
+        }
+
+        comfyItem?.let { item ->
+            SendToComfySheet(item = item, onDismiss = { comfyItem = null })
         }
 
         // Swipe-up / Info Sheet
@@ -646,6 +620,29 @@ private fun ZoomableImageView(
  * either is laid out. The row is given this height explicitly so the two stay in agreement.
  */
 private val ViewerActionRowHeight = 52.dp
+
+/**
+ * The top bar's own height, under the status bar. Kept thinner than the status bar itself at
+ * the owner's request: it is a strip of information, and every dp of it is taken from the
+ * picture. Fixed for the same reason as [ViewerActionRowHeight].
+ */
+private val ViewerTopBarHeight = 24.dp
+
+/**
+ * An icon button for the thin top bar. Not `IconButton`, which insists on a 48 dp square and
+ * would make the bar twice as tall; wider than it is tall instead, to stay easy to hit.
+ */
+@Composable
+private fun TopBarIcon(icon: ImageVector, description: String, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(width = 44.dp, height = ViewerTopBarHeight)
+            .clickable(role = Role.Button, onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(icon, contentDescription = description, tint = Color.White, modifier = Modifier.size(18.dp))
+    }
+}
 
 /**
  * Which item the viewer is showing, by id, across changes to the list underneath it.

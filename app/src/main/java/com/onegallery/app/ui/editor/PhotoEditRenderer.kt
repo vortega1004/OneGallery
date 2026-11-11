@@ -8,6 +8,7 @@ import android.graphics.ColorMatrixColorFilter
 import android.graphics.ImageDecoder
 import android.graphics.Matrix
 import android.graphics.Paint
+import android.graphics.Rect
 import android.net.Uri
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -34,10 +35,17 @@ object PhotoEditRenderer {
      * orientation itself, so the result is always upright and the saved copy needs no
      * orientation tag. Software-allocated because hardware bitmaps cannot be drawn to a Canvas.
      */
-    fun decode(context: Context, uri: Uri, maxPx: Int): Bitmap {
+    fun decode(
+        context: Context,
+        uri: Uri,
+        maxPx: Int,
+        /** Told the photo's full, upright size — whatever [maxPx] reduces it to. */
+        onSourceSize: ((width: Int, height: Int) -> Unit)? = null
+    ): Bitmap {
         val source = ImageDecoder.createSource(context.contentResolver, uri)
         return ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
             decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            onSourceSize?.invoke(info.size.width, info.size.height)
             val longestSide = max(info.size.width, info.size.height)
             if (longestSide > maxPx) {
                 val ratio = maxPx.toFloat() / longestSide
@@ -64,8 +72,8 @@ object PhotoEditRenderer {
     }
 
     /**
-     * Full pipeline: orient, crop, colour. Intermediate bitmaps are recycled; [source] never
-     * is. The result may be [source] itself when the state changes nothing.
+     * Full pipeline: orient, crop, colour, canvas. Intermediate bitmaps are recycled; [source]
+     * never is. The result may be [source] itself when the state changes nothing.
      */
     fun render(source: Bitmap, state: PhotoEditState): Bitmap {
         val oriented = orient(source, state)
@@ -73,16 +81,41 @@ object PhotoEditRenderer {
         val cropped = crop(oriented, state.crop)
         if (cropped !== oriented && oriented !== source) oriented.recycle()
 
-        if (!state.hasColorAdjustments) return cropped
-
-        val output = Bitmap.createBitmap(cropped.width, cropped.height, Bitmap.Config.ARGB_8888)
-        val paint = Paint(Paint.FILTER_BITMAP_FLAG).apply {
-            colorFilter = ColorMatrixColorFilter(ColorMatrix(state.colorMatrixValues()))
+        val photo = if (!state.hasColorAdjustments) {
+            cropped
+        } else {
+            val adjusted = Bitmap.createBitmap(cropped.width, cropped.height, Bitmap.Config.ARGB_8888)
+            val paint = Paint(Paint.FILTER_BITMAP_FLAG).apply {
+                colorFilter = ColorMatrixColorFilter(ColorMatrix(state.colorMatrixValues()))
+            }
+            Canvas(adjusted).drawBitmap(cropped, 0f, 0f, paint)
+            if (cropped !== source) cropped.recycle()
+            adjusted
         }
-        Canvas(output).drawBitmap(cropped, 0f, 0f, paint)
-        if (cropped !== source) cropped.recycle()
+
+        // Last, so the colour adjustments above can never tint the fill
+        val placed = state.canvas.layout(photo.width, photo.height) ?: return photo
+        val output = Bitmap.createBitmap(placed.canvasWidth, placed.canvasHeight, Bitmap.Config.ARGB_8888)
+        Canvas(output).apply {
+            // Opaque whatever was stored: a see-through fill would save as black in a JPEG
+            drawColor(state.canvas.color or OPAQUE)
+            drawBitmap(
+                photo,
+                null,
+                Rect(
+                    placed.imageLeft,
+                    placed.imageTop,
+                    placed.imageLeft + placed.imageWidth,
+                    placed.imageTop + placed.imageHeight
+                ),
+                Paint(Paint.FILTER_BITMAP_FLAG)
+            )
+        }
+        if (photo !== source) photo.recycle()
         return output
     }
+
+    private const val OPAQUE: Int = 0xFF000000.toInt()
 
     private fun crop(bitmap: Bitmap, rect: NormalizedRect): Bitmap {
         if (rect.isFull) return bitmap

@@ -2,6 +2,7 @@ package com.onegallery.app.data
 
 import android.content.ContentResolver
 import android.content.Context
+import android.graphics.Bitmap
 import android.net.Uri
 import android.provider.MediaStore
 import android.util.Size
@@ -15,7 +16,10 @@ import coil3.fetch.ImageFetchResult
 import coil3.request.Options
 import coil3.size.Dimension
 import kotlinx.coroutines.Dispatchers
+import io.github.anilbeesetti.nextlib.mediainfo.MediaInfoBuilder
 import kotlinx.coroutines.withContext
+import kotlin.math.min
+import kotlin.math.roundToInt
 
 /**
  * Serves grid and filmstrip cells from MediaStore's own pre-generated thumbnails.
@@ -42,10 +46,14 @@ class MediaThumbnailFetcher(
         val bitmap = try {
             context.contentResolver.loadThumbnail(uri, requestedSize(), null)
         } catch (e: Exception) {
-            // No thumbnail, or the item vanished mid-scroll. Returning null lets Coil fall
-            // back to decoding the original rather than showing a hole.
+            // No thumbnail, or the item vanished mid-scroll
             null
-        } ?: return@withContext null
+        }
+            // A video the phone's own decoders refuse has no MediaStore thumbnail either.
+            // FFmpeg can usually still read a frame from it.
+            ?: ffmpegFrame()
+            // Null lets Coil try the original itself rather than showing a hole
+            ?: return@withContext null
 
         ImageFetchResult(
             image = bitmap.asImage(),
@@ -53,6 +61,30 @@ class MediaThumbnailFetcher(
             isSampled = true,
             dataSource = DataSource.DISK
         )
+    }
+
+    /** A frame read by FFmpeg, scaled to the request; null for anything but a readable video. */
+    private fun ffmpegFrame(): Bitmap? {
+        if (!uri.pathSegments.contains("video")) return null
+        return runCatching {
+            val info = MediaInfoBuilder().from(context, uri).build() ?: return null
+            try {
+                val frame = (if (info.supportsFrameLoading) info.getFrame() else null) ?: return null
+                val wanted = requestedSize()
+                val scale = min(
+                    wanted.width.toFloat() / frame.width,
+                    wanted.height.toFloat() / frame.height
+                ).coerceAtMost(1f)
+                if (scale >= 1f) frame else Bitmap.createScaledBitmap(
+                    frame,
+                    (frame.width * scale).roundToInt().coerceAtLeast(1),
+                    (frame.height * scale).roundToInt().coerceAtLeast(1),
+                    true
+                )
+            } finally {
+                info.release()
+            }
+        }.getOrNull()
     }
 
     private fun requestedSize(): Size {
@@ -85,10 +117,12 @@ class MediaThumbnailFetcher(
     private companion object {
         /**
          * Above this, assume the caller wants a real image (the fullscreen viewer) and leave it
-         * to Coil's normal decoder. Comfortably larger than any grid cell, even at 1 column on
-         * a tablet.
+         * to Coil's normal decoder. It was 512, which sounded generous and was not: an album
+         * cover on a Pixel 9 Pro XL is 606 px and a cell of the two-column grid is 672, so both
+         * fell through to decoding the original file — a 12 MP JPEG, or a video decoder, per
+         * cover. MediaStore serves and caches thumbnails up to this size.
          */
-        const val MAX_THUMBNAIL_PX = 512
+        const val MAX_THUMBNAIL_PX = 1024
 
         /** MediaStore rejects zero/negative sizes. */
         const val MIN_THUMBNAIL_PX = 32
@@ -107,5 +141,5 @@ private fun Dimension.pxOrNull(): Int? = (this as? Dimension.Pixels)?.px
 private fun coil3.size.Size.isThumbnailScale(): Boolean {
     val w = width.pxOrNull() ?: return false
     val h = height.pxOrNull() ?: return false
-    return w in 1..512 && h in 1..512
+    return w in 1..1024 && h in 1..1024
 }

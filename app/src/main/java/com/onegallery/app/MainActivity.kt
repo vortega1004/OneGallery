@@ -28,16 +28,27 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.material3.Button
+import androidx.compose.material3.SnackbarData
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -56,18 +67,19 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel as composeViewModel
+import com.onegallery.app.data.comfy.ComfyController
+import com.onegallery.app.ui.comfy.ComfyConnectionScreen
+import com.onegallery.app.ui.comfy.ComfyJobsScreen
 import com.onegallery.app.ui.gif.GifCreatorScreen
 import com.onegallery.app.ui.gif.GifCreatorViewModel
 import kotlinx.coroutines.launch
-import com.onegallery.app.domain.forAlbum
-import com.onegallery.app.domain.sortedBy
 import com.onegallery.app.data.MoveDestination
 import com.onegallery.app.data.MoveResult
 import com.onegallery.app.data.canMoveAnywhere
 import com.onegallery.app.domain.MediaItem
-import com.onegallery.app.domain.toAlbums
 import com.onegallery.app.ui.grid.GalleryGridScreen
 import com.onegallery.app.ui.move.MoveToAlbumSheet
+import com.onegallery.app.ui.trash.TrashScreen
 import com.onegallery.app.ui.theme.DarkBackground
 import com.onegallery.app.ui.theme.OneGalleryTheme
 import com.onegallery.app.ui.viewer.MediaViewerScreen
@@ -115,7 +127,21 @@ class MainActivity : ComponentActivity() {
                             onBack = { finish() }
                         )
                     }
-                    hasStoragePermission -> GalleryApp(viewModel = viewModel)
+                    hasStoragePermission -> {
+                        val messages = remember { SnackbarHostState() }
+                        Box(Modifier.fillMaxSize()) {
+                            GalleryApp(viewModel = viewModel, messages = messages)
+                            // At the top, under the header: the bottom of every screen is
+                            // where the controls are, and a message must not sit on them
+                            SnackbarHost(
+                                hostState = messages,
+                                modifier = Modifier
+                                    .align(Alignment.TopCenter)
+                                    .statusBarsPadding()
+                                    .padding(top = 76.dp)
+                            ) { data -> MessagePill(data) }
+                        }
+                    }
                     else -> {
                         PermissionRequestScreen(
                             onRequest = ::requestMediaPermissions,
@@ -186,9 +212,14 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/**
+ * @param messages where short confirmations go ("Moved 3 items to the trash · Undo"). Owned by
+ *   the caller so the message survives this screen swapping between grid, viewer and trash.
+ */
 @Composable
-fun GalleryApp(viewModel: GalleryViewModel) {
-    val mediaItems by viewModel.mediaItems.collectAsStateWithLifecycle()
+fun GalleryApp(viewModel: GalleryViewModel, messages: SnackbarHostState) {
+    val library by viewModel.library.collectAsStateWithLifecycle()
+    val mediaItems = library.items
     var selectedItemIndex by rememberSaveable { mutableIntStateOf(-1) }
     var selectionMode by rememberSaveable { mutableStateOf(false) }
     var selectedImageIds by rememberSaveable { mutableStateOf(longArrayOf()) }
@@ -198,6 +229,8 @@ fun GalleryApp(viewModel: GalleryViewModel) {
     // in the composition, so state owned by the grid would be discarded every time a photo is
     // opened. Holding it here is what makes back-from-viewer return to the album you were in.
     var openedAlbumId by rememberSaveable { mutableStateOf<String?>(null) }
+    // The group the user is inside, if any. An album opened from a group returns to it.
+    var openedGroupId by rememberSaveable { mutableStateOf<String?>(null) }
     var columnCount by rememberSaveable { mutableIntStateOf(3) }
 
     // Grid scroll positions live here for the same reason as the state above: the grid is
@@ -205,6 +238,7 @@ fun GalleryApp(viewModel: GalleryViewModel) {
     // top of the library every time the user opened a photo.
     val albumGridState = rememberLazyGridState()
     val albumListGridState = rememberLazyGridState()
+    val groupGridState = rememberLazyGridState()
     val scope = rememberCoroutineScope()
 
     // Which album the viewer was opened from
@@ -220,7 +254,7 @@ fun GalleryApp(viewModel: GalleryViewModel) {
     // start and not just the viewer. Media sort is per album — `mediaSortFor` falls back to the
     // last order chosen anywhere for folders the user has never sorted. See `SortPreferences`.
     val sortPreferences by viewModel.sortPreferences.collectAsStateWithLifecycle()
-    val albumSort = sortPreferences.albumSort
+    val albumLayout by viewModel.albumLayout.collectAsStateWithLifecycle()
     val mediaSort = sortPreferences.mediaSortFor(openedAlbumId)
 
     // Scope the pager to the set the user was actually looking at, so swiping inside an album
@@ -231,8 +265,8 @@ fun GalleryApp(viewModel: GalleryViewModel) {
     // Sorted by the *viewer's* album, which is the album the grid was showing when the photo
     // was tapped. Reading `mediaSort` here would be wrong the moment the two differ.
     val viewerMediaSort = sortPreferences.mediaSortFor(viewerAlbumId)
-    val viewerItems = remember(mediaItems, viewerAlbumId, viewerMediaSort) {
-        mediaItems.forAlbum(viewerAlbumId).sortedBy(viewerMediaSort)
+    val viewerItems = remember(library, viewerAlbumId, viewerMediaSort) {
+        library.album(viewerAlbumId, viewerMediaSort)
     }
 
     val closeViewer = {
@@ -256,18 +290,87 @@ fun GalleryApp(viewModel: GalleryViewModel) {
     // Declared before the GIF creator's early return so the launcher is always registered.
     val context = LocalContext.current
     var moveIds by rememberSaveable { mutableStateOf<LongArray?>(null) }
-    var awaitingConsent by remember { mutableStateOf<Pair<List<MediaItem>, MoveDestination>?>(null) }
+    // What to do once the user has answered the system's consent dialog (moving, trashing and
+    // deleting each have one, for an app without All files access). Told whether they agreed.
+    var afterConsent by remember { mutableStateOf<((Boolean) -> Unit)?>(null) }
     val consent = rememberLauncherForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
-        val move = awaitingConsent
-        awaitingConsent = null
-        if (result.resultCode == Activity.RESULT_OK && move != null) {
-            viewModel.move(move.first, move.second) { outcome ->
-                Toast.makeText(context, describeMove(outcome, move.second), Toast.LENGTH_LONG).show()
-                selectionMode = false
-                selectedImageIds = longArrayOf()
+        val next = afterConsent
+        afterConsent = null
+        next?.invoke(result.resultCode == Activity.RESULT_OK)
+    }
+
+    // --- ComfyUI --------------------------------------------------------------------------
+    var showComfyJobs by rememberSaveable { mutableStateOf(false) }
+    var showComfyConnection by rememberSaveable { mutableStateOf(false) }
+    // "Sent", "finished · saved", "failed": said once, wherever in the app the user is by then
+    val comfy = remember { ComfyController.get(context) }
+    LaunchedEffect(comfy) {
+        comfy.messages.collect { text ->
+            messages.currentSnackbarData?.dismiss()
+            scope.launch { messages.showSnackbar(text, duration = SnackbarDuration.Short) }
+        }
+    }
+
+    // --- Trash ----------------------------------------------------------------------------
+    var showTrash by rememberSaveable { mutableStateOf(false) }
+
+    // Trashes ([toTrash]) or restores. With All files access it just happens; otherwise the
+    // system asks once for the batch and does the work itself when the user agrees.
+    fun changeTrash(uris: List<Uri>, toTrash: Boolean) {
+        if (uris.isEmpty()) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            Toast.makeText(context, "The trash needs Android 11 or newer", Toast.LENGTH_LONG).show()
+            return
+        }
+        val finished: (Int) -> Unit = { count ->
+            selectionMode = false
+            selectedImageIds = longArrayOf()
+            if (count == 0) {
+                Toast.makeText(context, "Nothing could be changed", Toast.LENGTH_LONG).show()
+            } else {
+                scope.launch {
+                    messages.currentSnackbarData?.dismiss()
+                    val what = if (count == 1) "1 item" else "$count items"
+                    val answer = messages.showSnackbar(
+                        message = if (toTrash) "Moved $what to the trash" else "Restored $what",
+                        // A slip of the thumb on Delete is one tap from undone
+                        actionLabel = if (toTrash) "Undo" else null,
+                        duration = SnackbarDuration.Short
+                    )
+                    if (answer == SnackbarResult.ActionPerformed) changeTrash(uris, toTrash = false)
+                }
             }
+        }
+        if (canMoveAnywhere()) {
+            viewModel.setTrashed(uris, toTrash, finished)
+        } else {
+            afterConsent = { agreed -> if (agreed) finished(uris.size) }
+            consent.launch(
+                IntentSenderRequest.Builder(viewModel.trash.trashRequest(uris, toTrash).intentSender).build()
+            )
+        }
+    }
+
+    fun deleteForever(uris: List<Uri>) {
+        if (uris.isEmpty() || Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        val finished: (Int) -> Unit = { count ->
+            scope.launch {
+                messages.currentSnackbarData?.dismiss()
+                messages.showSnackbar(
+                    message = if (count == 1) "Deleted 1 item" else "Deleted $count items",
+                    duration = SnackbarDuration.Short
+                )
+            }
+        }
+        if (canMoveAnywhere()) {
+            viewModel.deleteForever(uris, finished)
+        } else {
+            afterConsent = { agreed -> if (agreed) finished(uris.size) }
+            consent.launch(
+                IntentSenderRequest.Builder(viewModel.trash.deleteRequest(uris).intentSender).build()
+            )
         }
     }
     val moveItems = remember(moveIds, mediaItems) {
@@ -276,7 +379,7 @@ fun GalleryApp(viewModel: GalleryViewModel) {
     if (!moveItems.isNullOrEmpty()) {
         MoveToAlbumSheet(
             items = moveItems,
-            albums = remember(mediaItems) { mediaItems.toAlbums() },
+            albums = library.albums,
             onMove = { destination ->
                 moveIds = null
                 if (canMoveAnywhere()) {
@@ -288,7 +391,15 @@ fun GalleryApp(viewModel: GalleryViewModel) {
                     }
                 } else {
                     // One system dialog for the whole batch
-                    awaitingConsent = moveItems to destination
+                    afterConsent = { agreed ->
+                        if (agreed) {
+                            viewModel.move(moveItems, destination) { outcome ->
+                                Toast.makeText(context, describeMove(outcome, destination), Toast.LENGTH_LONG).show()
+                                selectionMode = false
+                                selectedImageIds = longArrayOf()
+                            }
+                        }
+                    }
                     consent.launch(
                         IntentSenderRequest.Builder(viewModel.mover.writeRequest(moveItems).intentSender)
                             .build()
@@ -308,6 +419,30 @@ fun GalleryApp(viewModel: GalleryViewModel) {
                 selectedImageIds = longArrayOf()
             }
         })
+        return
+    }
+
+    if (showComfyConnection) {
+        ComfyConnectionScreen(onClose = { showComfyConnection = false })
+        return
+    }
+
+    if (showComfyJobs) {
+        ComfyJobsScreen(
+            onClose = { showComfyJobs = false },
+            onOpenConnection = { showComfyConnection = true }
+        )
+        return
+    }
+
+    if (showTrash) {
+        val trashed by viewModel.trashedItems.collectAsStateWithLifecycle()
+        TrashScreen(
+            items = trashed,
+            onRestore = { items -> changeTrash(items.map { it.uri }, toTrash = false) },
+            onDeleteForever = { items -> deleteForever(items.map { it.uri }) },
+            onClose = { showTrash = false }
+        )
         return
     }
 
@@ -336,11 +471,12 @@ fun GalleryApp(viewModel: GalleryViewModel) {
                 initialIndex = selectedItemIndex,
                 onBack = closeViewer,
                 onVisibleItemChange = { viewerVisibleItemId = it },
-                onMoveRequest = { moveIds = longArrayOf(it.id) }
+                onMoveRequest = { moveIds = longArrayOf(it.id) },
+                onTrashRequest = { changeTrash(listOf(it.uri), toTrash = true) }
             )
         } else {
             GalleryGridScreen(
-                mediaItems = mediaItems,
+                library = library,
                 openedAlbumId = openedAlbumId,
                 onOpenAlbum = { albumId ->
                     // One LazyGridState serves every album, so without this a folder opens at
@@ -357,17 +493,17 @@ fun GalleryApp(viewModel: GalleryViewModel) {
                 restoreToItemId = restoreToItemId,
                 onRestoreHandled = { restoreToItemId = null },
                 albumListGridState = albumListGridState,
-                albumSort = albumSort,
-                // Changing the sort must jump back to the top. LazyGrid keys are stable, so it
-                // otherwise anchors whatever item was first visible and follows it to its new
-                // position — picking "Name (Z-A)" would leave you in the middle of the list.
-                // Done here as an explicit event rather than a LaunchedEffect on the sort value,
-                // which would also fire when returning from the viewer and fight the
-                // restore-to-item scroll.
-                onAlbumSortChange = {
-                    viewModel.setAlbumSort(it)
-                    scope.launch { albumListGridState.scrollToTopAfterReorder() }
+                albumLayout = albumLayout,
+                onAlbumLayoutChange = viewModel::setAlbumLayout,
+                initialAlbumSort = sortPreferences.albumSort,
+                openedGroupId = openedGroupId,
+                onOpenGroup = { groupId ->
+                    if (groupId != null && groupId != openedGroupId) {
+                        scope.launch { groupGridState.scrollToItem(0) }
+                    }
+                    openedGroupId = groupId
                 },
+                groupGridState = groupGridState,
                 mediaSort = mediaSort,
                 selectionMode = selectionMode,
                 selectedImageIds = selectedImageIds.toSet(),
@@ -375,6 +511,10 @@ fun GalleryApp(viewModel: GalleryViewModel) {
                 onSelectionChange = { selectedImageIds = it.toLongArray() },
                 onCreateGif = gifCreator::open,
                 onMove = { items -> moveIds = items.map { it.id }.toLongArray() },
+                onTrash = { items -> changeTrash(items.map { it.uri }, toTrash = true) },
+                onOpenTrash = { showTrash = true },
+                onOpenComfyJobs = { showComfyJobs = true },
+                onOpenComfyConnection = { showComfyConnection = true },
                 onMediaSortChange = {
                     // Recorded against the album on screen, so each folder keeps its own order
                     viewModel.setMediaSort(openedAlbumId, it)
@@ -385,6 +525,29 @@ fun GalleryApp(viewModel: GalleryViewModel) {
                     selectedItemIndex = index
                 }
             )
+        }
+    }
+}
+
+/** A confirmation and, when there is one, its undo — as wide as its words and no wider. */
+@Composable
+private fun MessagePill(data: SnackbarData) {
+    Row(
+        modifier = Modifier
+            .padding(horizontal = 24.dp)
+            .background(Color(0xF02A2D33), RoundedCornerShape(24.dp))
+            .padding(start = 20.dp, end = 8.dp)
+            .heightIn(min = 48.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = data.visuals.message,
+            color = Color.White,
+            fontSize = 14.sp,
+            modifier = Modifier.padding(end = 12.dp)
+        )
+        data.visuals.actionLabel?.let { label ->
+            TextButton(onClick = { data.performAction() }) { Text(label) }
         }
     }
 }

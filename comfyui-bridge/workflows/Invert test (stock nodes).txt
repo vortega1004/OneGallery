@@ -1,0 +1,1 @@
+Inverts the photo's colours. Uses only built-in nodes, so it works without the OneGallery node pack.

@@ -7,3 +7,6 @@
 
 # Keep domain models used via reflection-free Compose state
 -keep class com.onegallery.app.domain.** { *; }
+
+# NextLib (FFmpeg): its native code calls back into these classes by name
+-keep class io.github.anilbeesetti.nextlib.** { *; }

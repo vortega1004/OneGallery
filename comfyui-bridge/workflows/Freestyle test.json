@@ -1,0 +1,33 @@
+{
+  "1": {
+    "class_type": "OneGalleryImageInput",
+    "inputs": {
+      "image": "example.png"
+    },
+    "_meta": {
+      "title": "Phone Image (OneGallery)"
+    }
+  },
+  "2": {
+    "class_type": "OneGalleryPrompt",
+    "inputs": {
+      "text": "a photo, studio lighting"
+    },
+    "_meta": {
+      "title": "Phone Prompt (OneGallery)"
+    }
+  },
+  "3": {
+    "class_type": "OneGallerySendBack",
+    "inputs": {
+      "filename_prefix": "OneGallery/freestyle",
+      "images": [
+        "1",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Send to Phone (OneGallery)"
+    }
+  }
+}

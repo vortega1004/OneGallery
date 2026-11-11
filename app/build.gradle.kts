@@ -19,6 +19,11 @@ android {
         vectorDrawables {
             useSupportLibrary = true
         }
+        // The FFmpeg libraries ship native code for four architectures. Phones are arm64 and
+        // the emulator is x86_64; the two 32-bit builds would only add size.
+        ndk {
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
     }
 
     buildTypes {
@@ -31,6 +36,16 @@ android {
         }
         debug {
             isMinifyEnabled = false
+        }
+        // The build to put on a phone for everyday use: optimised like `release`, signed with
+        // the debug key so it installs without a keystore of its own (and over a debug build
+        // without losing data). A debug build is debuggable, which switches off most of ART's
+        // optimisations — Compose in particular is several times slower in it.
+        //   ./gradlew assembleDaily  ->  app/build/outputs/apk/daily/app-daily.apk
+        create("daily") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += "release"
         }
     }
 
@@ -75,6 +90,11 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.8.0")
     implementation("androidx.media3:media3-ui:1.8.0")
     implementation("androidx.media3:media3-common:1.8.0")
+    // FFmpeg software decoders, for files the phone's own decoders refuse (10-bit H.264 and
+    // the like — ComfyUI can write them). Used only as a fallback. The version is tied to the
+    // Media3 version above. GPL-3.0: see HANDOFF.md before distributing a build.
+    implementation("io.github.anilbeesetti:nextlib-media3ext:1.8.0-0.9.0")
+    implementation("io.github.anilbeesetti:nextlib-mediainfo:1.8.0-0.9.0")
 
     // Persisted user preferences (sort orders)
     implementation("androidx.datastore:datastore-preferences:1.1.1")
@@ -86,6 +106,8 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     // Unit tests (pure Kotlin only - e.g. the editor's transform math)
+    // android.jar's org.json is stubs in plain unit tests; this is the real thing, tests only
+    testImplementation("org.json:json:20240303")
     testImplementation("junit:junit:4.13.2")
 
     debugImplementation("androidx.compose.ui:ui-tooling")

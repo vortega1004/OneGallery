@@ -1,0 +1,50 @@
+{
+  "1": {
+    "class_type": "OneGalleryImageInput",
+    "inputs": {
+      "image": "example.png"
+    },
+    "_meta": {
+      "title": "Phone Image (OneGallery)"
+    }
+  },
+  "2": {
+    "class_type": "RepeatImageBatch",
+    "inputs": {
+      "image": [
+        "1",
+        0
+      ],
+      "amount": 16
+    },
+    "_meta": {
+      "title": "Repeat Image Batch"
+    }
+  },
+  "3": {
+    "class_type": "CreateVideo",
+    "inputs": {
+      "images": [
+        "2",
+        0
+      ],
+      "fps": 8.0
+    },
+    "_meta": {
+      "title": "Create Video"
+    }
+  },
+  "4": {
+    "class_type": "OneGallerySendBack",
+    "inputs": {
+      "filename_prefix": "OneGallery/video-echo",
+      "video": [
+        "3",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Send to Phone (OneGallery)"
+    }
+  }
+}

@@ -1,0 +1,1 @@
+Sends the photo straight back. Proves the phone, the gateway and ComfyUI are connected.

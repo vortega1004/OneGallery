@@ -3,7 +3,9 @@ package com.onegallery.app.ui.video
 import android.graphics.Bitmap
 import android.os.Handler
 import android.os.Looper
-import android.view.TextureView
+import android.util.Log
+import android.view.PixelCopy
+import android.view.SurfaceView
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.annotation.OptIn
@@ -71,6 +73,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -79,9 +82,11 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.media3.common.MediaItem as ExoMediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.ScrubbingModeParameters
 import androidx.media3.ui.PlayerView
@@ -92,14 +97,20 @@ import com.onegallery.app.data.MediaStoreRepository
 import com.onegallery.app.domain.MediaItem
 import com.onegallery.app.ui.theme.OneUIBlue
 import com.onegallery.app.ui.theme.ShutterFlashColor
+import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.NextRenderersFactory
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.coroutines.resume
 import kotlin.math.abs
+import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
@@ -114,18 +125,19 @@ import kotlin.math.roundToLong
  * The controls share their visibility with the host screen's overlays ([controlsVisible]) and are
  * laid out inside [controlsPadding], for a host that draws its own chrome *over* this page. When
  * the host instead reserves room (insetting the page above its bottom bar, as the viewer does)
- * that padding is zero. Playback only runs while [isActivePage] is true and the app is in the
- * foreground.
+ * that padding is zero.
+ *
+ * **One player at a time.** A page gets a player — a decoder, a playback thread, a surface —
+ * only once it has been the settled page ([isActivePage]) for a moment, and gives it up the
+ * moment it stops being that. Until then it is a poster: the thumbnail, and nothing else. Every
+ * page used to build its own player as soon as it was composed, so swiping or scrubbing the
+ * filmstrip created and tore down a player per page passed, and a phone has only so many
+ * hardware decoders to hand out.
  *
  * Sound is controlled by the host ([isMuted]) rather than per player, so the choice carries
  * from one video to the next while the user pages through the viewer. Videos autoplay, so the
  * host is expected to start muted.
- *
- * [onFrameWalkChange] tells the host when the user starts walking frames and when they go back
- * to playing. Someone stepping frame by frame is studying the picture, so the host takes its own
- * chrome off it for as long as that lasts.
  */
-@OptIn(UnstableApi::class)
 @Composable
 fun VideoPlayerView(
     mediaItem: MediaItem,
@@ -136,8 +148,65 @@ fun VideoPlayerView(
     controlsPadding: PaddingValues = PaddingValues(0.dp),
     isMuted: Boolean = true,
     onMutedChange: (Boolean) -> Unit = {},
-    onFrameWalkChange: (Boolean) -> Unit = {},
     onSnapshotTaken: ((Bitmap) -> Unit)? = null
+) {
+    // The short wait matters while scrubbing the filmstrip: every page it passes is "settled"
+    // for a frame or two, and without the wait each video on the way would get a player.
+    var live by remember(mediaItem.uri) { mutableStateOf(false) }
+    LaunchedEffect(isActivePage) {
+        if (isActivePage) {
+            delay(ACTIVATION_DELAY_MS)
+            live = true
+        } else {
+            live = false
+        }
+    }
+
+    if (live) {
+        LiveVideoPlayer(
+            mediaItem = mediaItem,
+            modifier = modifier,
+            controlsVisible = controlsVisible,
+            onControlsVisibleChange = onControlsVisibleChange,
+            controlsPadding = controlsPadding,
+            isMuted = isMuted,
+            onMutedChange = onMutedChange,
+            onSnapshotTaken = onSnapshotTaken
+        )
+    } else {
+        // Thumbnail-sized, so it is served from MediaStore's cache (usually already in memory
+        // from the grid or the filmstrip)
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) { onControlsVisibleChange(!controlsVisible) }
+        ) {
+            AsyncImage(
+                model = rememberThumbnailRequest(mediaItem.uri),
+                contentDescription = mediaItem.displayName,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+    }
+}
+
+/** The page that is actually on screen: the player, the frame walk and the controls. */
+@OptIn(UnstableApi::class)
+@Composable
+private fun LiveVideoPlayer(
+    mediaItem: MediaItem,
+    modifier: Modifier,
+    controlsVisible: Boolean,
+    onControlsVisibleChange: (Boolean) -> Unit,
+    controlsPadding: PaddingValues,
+    isMuted: Boolean,
+    onMutedChange: (Boolean) -> Unit,
+    onSnapshotTaken: ((Bitmap) -> Unit)?
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
@@ -164,7 +233,20 @@ fun VideoPlayerView(
     var showCapturedBadge by remember { mutableStateOf(false) }
     var captureCount by remember { mutableIntStateOf(0) }
 
-    var textureViewRef by remember { mutableStateOf<TextureView?>(null) }
+    // The surface the player draws on, for copying the frame on screen when a capture is taken
+    var surfaceViewRef by remember { mutableStateOf<SurfaceView?>(null) }
+
+    // Set when the player gives up on the file, so the page says so instead of sitting black
+    var playbackError by remember(mediaItem.uri) { mutableStateOf<String?>(null) }
+
+    // When every frame of this video is shown, read from the file in the background as soon
+    // as the page is live. Frame numbers, the frame count and the rate on the readout all come
+    // from this; nothing is worked out from an assumed frame rate while it is available.
+    val timelineLoad: Deferred<VideoTimeline?> = remember(mediaItem.uri) {
+        coroutineScope.async { FrameServer.readTimeline(context.applicationContext, mediaItem.uri) }
+    }
+    var timeline by remember(mediaItem.uri) { mutableStateOf<VideoTimeline?>(null) }
+    LaunchedEffect(timelineLoad) { timeline = timelineLoad.await() }
 
     // Bumped on every seek the user drives (frame steps, jog strip, seek bar). Scrubbing mode is
     // switched on for the burst and off again once they stop — see the effect below.
@@ -179,11 +261,11 @@ fun VideoPlayerView(
     var playerSizePx by remember { mutableStateOf(IntSize.Zero) }
 
     // Frame-stepping state. While [stepIndex] is non-null the page is showing a decoded still
-    // from [frameCache] rather than the player's own output, and every step is a lookup into
-    // frames that are already in memory — see VideoFrameCache for why the player cannot do this.
-    var frameCache by remember(mediaItem.uri) { mutableStateOf<VideoFrameCache?>(null) }
-    var frameCacheChecked by remember(mediaItem.uri) { mutableStateOf(false) }
-    var frameCacheOpened by remember(mediaItem.uri) { mutableStateOf(false) }
+    // from [frameServer] rather than the player's own output, and every step is a lookup into
+    // frames that are already in memory — see FrameServer for why the player cannot do this.
+    var frameServer by remember(mediaItem.uri) { mutableStateOf<FrameServer?>(null) }
+    var frameServerChecked by remember(mediaItem.uri) { mutableStateOf(false) }
+    var frameServerOpened by remember(mediaItem.uri) { mutableStateOf(false) }
     var stepIndex by remember(mediaItem.uri) { mutableStateOf<Int?>(null) }
     var stepBitmap by remember(mediaItem.uri) { mutableStateOf<Bitmap?>(null) }
     // Which frame [stepBitmap] actually is. When it trails [stepIndex] the picture has not
@@ -231,15 +313,18 @@ fun VideoPlayerView(
     val lastFrameUs = remember(mediaItem.uri) { AtomicLong(-1L) }
 
     val exoPlayer = remember(mediaItem.uri) {
-        ExoPlayer.Builder(context).build().apply {
+        // FFmpeg's software decoders stand behind the phone's own: a format the hardware
+        // refuses (10-bit H.264, for one — ComfyUI will happily write it) still plays, just
+        // on the CPU. "On", not "prefer": anything the phone can decode itself, it does.
+        val renderers = NextRenderersFactory(context)
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
+            .setEnableDecoderFallback(true)
+        ExoPlayer.Builder(context, renderers).build().apply {
             setMediaItem(ExoMediaItem.fromUri(mediaItem.uri))
             // Defaults only — the point is what they leave alone. ScrubbingModeParameters.DEFAULT
             // sets no fractional seek tolerance, so seeks stay frame-exact; what it does change is
             // keeping the codec warm between them (see the stepping comment below).
             setScrubbingModeParameters(ScrubbingModeParameters.DEFAULT)
-            // prepare() is deferred until this page is the active one (see below). Scrubbing the
-            // filmstrip composes every video page it passes; preparing each of them spun up a
-            // decoder per page for nothing.
             playWhenReady = false
             repeatMode = Player.REPEAT_MODE_ONE
             // Called on the playback thread as each frame is released to the surface, with
@@ -269,33 +354,18 @@ fun VideoPlayerView(
                 override fun onRenderedFirstFrame() {
                     firstFrameRendered = true
                 }
+
+                override fun onPlayerError(error: PlaybackException) {
+                    playbackError = describePlaybackError(error, mediaItem.mimeType)
+                }
             })
         }
     }
 
-    // Only the settled pager page plays; neighbours composed during a swipe stay paused.
-    // The short wait matters while scrubbing the filmstrip: every page it passes is "settled"
-    // for a frame or two, and without the wait each video on the way would start playing.
-    LaunchedEffect(exoPlayer, isActivePage) {
-        if (isActivePage) {
-            delay(ACTIVATION_DELAY_MS)
-            if (exoPlayer.playbackState == Player.STATE_IDLE) exoPlayer.prepare()
-            // Scrubbing mode silences the audio track, so it must not survive into playback
-            // that the user did not start from the play button (paging back onto a video
-            // they were mid-scrub on, for instance)
-            if (exoPlayer.isScrubbingModeEnabled) exoPlayer.setScrubbingModeEnabled(false)
-            exoPlayer.play()
-        } else {
-            exoPlayer.pause()
-            // A still left over from a walk would cover the video when this page comes back
-            stepJob?.cancel()
-            prefetchJob?.cancel()
-            handover.cancel()
-            stepIndex = null
-            parkedIndex = null
-            stepBitmap = null
-            stepBitmapIndex = null
-        }
+    // This composable only exists while its page is the one on screen, so it plays at once
+    LaunchedEffect(exoPlayer) {
+        if (exoPlayer.playbackState == Player.STATE_IDLE) exoPlayer.prepare()
+        exoPlayer.play()
     }
 
     LaunchedEffect(exoPlayer, isMuted) {
@@ -308,25 +378,28 @@ fun VideoPlayerView(
         exoPlayer.pause()
     }
     LifecycleEventEffect(Lifecycle.Event.ON_START) {
-        if (resumeOnStart && isActivePage) exoPlayer.play()
+        if (resumeOnStart) exoPlayer.play()
         resumeOnStart = false
     }
 
     // Ticking position updater
-    LaunchedEffect(exoPlayer, isPlaying) {
+    LaunchedEffect(exoPlayer, isPlaying, controlsVisible) {
         // Playback invalidates the step anchor: the player is now the authority on position again
         if (isPlaying) stepAnchorMs = null
         currentPositionMs = exoPlayer.currentPosition
         while (isPlaying) {
-            delay(100L)
+            // Every other display frame while the seek bar is showing: at ten updates a second
+            // the thumb visibly hopped along a five-second clip. Nothing reads the position
+            // while the controls are hidden, so it idles then.
+            delay(if (controlsVisible) 33L else 250L)
             currentPositionMs = exoPlayer.currentPosition
         }
     }
 
     // Auto-hide controls after 3 seconds
     val isSeeking = seekPositionMs != null
-    LaunchedEffect(controlsVisible, isPlaying, isActivePage, isSeeking) {
-        if (controlsVisible && isPlaying && isActivePage && !isSeeking) {
+    LaunchedEffect(controlsVisible, isPlaying, isSeeking) {
+        if (controlsVisible && isPlaying && !isSeeking) {
             delay(3000L)
             onControlsVisibleChange(false)
         }
@@ -359,20 +432,20 @@ fun VideoPlayerView(
     // Park the player under the still once the user stops tapping. The walk itself never
     // touches the player; this is the one seek it owes, taken while nobody is waiting on it,
     // so that play afterwards starts at once instead of starting with a seek.
-    LaunchedEffect(stepIndex, frameCache) {
+    LaunchedEffect(stepIndex, frameServer) {
         val index = stepIndex ?: return@LaunchedEffect
-        val cache = frameCache ?: return@LaunchedEffect
+        val cache = frameServer ?: return@LaunchedEffect
         delay(PARK_IDLE_MS)
         if (parkedIndex != index) {
-            exoPlayer.seekTo(cache.positionMsFor(index))
+            exoPlayer.seekTo(cache.timeline.seekPositionMs(index))
             parkedIndex = index
         }
     }
 
     // Tens of megabytes of decoded frames, and a retriever holding the file open.
     // The instance is captured rather than read inside onDispose: by the time disposal runs,
-    // `frameCache` is already the value that replaced it, and the old one would never close.
-    val cacheToRelease = frameCache
+    // `frameServer` is already the value that replaced it, and the old one would never close.
+    val cacheToRelease = frameServer
     DisposableEffect(cacheToRelease) {
         onDispose { cacheToRelease?.close() }
     }
@@ -383,10 +456,22 @@ fun VideoPlayerView(
         if (us >= 0L) us / 1000 else exoPlayer.currentPosition
     }
 
-    /** Which frame is on screen, for starting a walk from it. */
-    val shownFrameIndex: (VideoFrameCache) -> Int = { cache ->
+    /**
+     * Which frame is on screen, for starting a walk from it: the one whose time matches the
+     * frame the player last drew. Before it has drawn one, the frame the clock has reached.
+     */
+    val shownFrameIndex: (VideoTimeline) -> Int = { times ->
+        val anchor = stepAnchorMs
         val us = lastFrameUs.get()
-        if (us >= 0L) cache.nearestIndexFor(us / 1000) else cache.indexFor(exoPlayer.currentPosition)
+        when {
+            // A seek the user just made says where they are, whether or not the player has
+            // drawn it yet. On a clip with one keyframe a seek to the end decodes the whole
+            // clip first; a step taken in that second used to start from the frame that was
+            // still on screen — the one from before the seek.
+            anchor != null -> times.nearestIndexMs(anchor)
+            us >= 0L -> times.nearestIndexUs(us)
+            else -> times.indexAtOrBeforeUs(exoPlayer.currentPosition * 1000)
+        }
     }
 
     /**
@@ -413,7 +498,7 @@ fun VideoPlayerView(
      * was just given has not been rendered yet.
      */
     val leaveStepping: (Boolean) -> Unit = { keepStillBriefly ->
-        val cache = frameCache
+        val cache = frameServer
         val index = stepIndex
         stepJob?.cancel()
         stepJob = null
@@ -421,7 +506,7 @@ fun VideoPlayerView(
         prefetchJob = null
         var handoverFromUs = 0L
         if (cache != null && index != null) {
-            val position = cache.positionMsFor(index)
+            val position = cache.timeline.seekPositionMs(index)
             currentPositionMs = position
             handoverFromUs = position * 1000
             if (parkedIndex != index) exoPlayer.seekTo(position)
@@ -441,7 +526,7 @@ fun VideoPlayerView(
      * Frame-accurate stepping (buttons and jog strip). Always pauses: single frames are only
      * meaningful on a still picture.
      *
-     * Two paths. With a [VideoFrameCache] the walk happens entirely in decoded frames — the
+     * Two paths. With a [FrameServer] the walk happens entirely in decoded frames — the
      * index moves immediately, the picture follows as soon as its bitmap is in hand, and the
      * player is not touched until the user leaves stepping. Without one (a container whose
      * frames cannot be addressed by index) it falls back to seeking the player, which is
@@ -449,12 +534,20 @@ fun VideoPlayerView(
      */
     val seekStepFrames: (Long, Int) -> Unit = { fromMs, frames ->
         beginScrub()
-        val target = frameStepPositionMs(
-            currentMs = fromMs,
-            frames = frames,
-            frameRate = exoPlayer.videoFormat?.frameRate ?: -1f,
-            durationMs = durationMs
-        )
+        // With the frame times in hand the target is a lookup; the rate-based arithmetic is
+        // only for a file whose times could not be read at all
+        val times = timeline
+        val target = if (times != null) {
+            val from = times.nearestIndexMs(fromMs)
+            times.seekPositionMs((from + frames).coerceIn(0, times.lastIndex))
+        } else {
+            frameStepPositionMs(
+                currentMs = fromMs,
+                frames = frames,
+                frameRate = exoPlayer.videoFormat?.frameRate ?: -1f,
+                durationMs = durationMs
+            )
+        }
         stepAnchorMs = target
         exoPlayer.seekTo(target)
         // The position ticker only runs during playback
@@ -463,19 +556,18 @@ fun VideoPlayerView(
 
     val stepFrames: (Int) -> Unit = { frames ->
         exoPlayer.pause()
-        onFrameWalkChange(true)
-        val cache = frameCache
-        if (cache == null && !frameCacheOpened) {
+        val cache = frameServer
+        if (cache == null && !frameServerOpened) {
             // The cache is on its way. Bank the step rather than seeking for it — the open will
             // apply it, and nothing else touches the position in the meantime.
             queuedSteps += frames
         } else if (cache != null) {
-            val from = stepIndex ?: shownFrameIndex(cache)
+            val from = stepIndex ?: shownFrameIndex(cache.timeline)
             val target = (from + frames).coerceIn(0, cache.lastIndex)
             stepIndex = target
             // The number is the whole point of the readout: it must be true the moment the
             // button is released, whether or not the picture has caught up yet.
-            currentPositionMs = cache.positionMsFor(target)
+            currentPositionMs = cache.timeline.seekPositionMs(target)
             cache.cached(target)?.let { stepBitmap = it; stepBitmapIndex = target }
             stepJob?.cancel()
             stepJob = coroutineScope.launch {
@@ -488,8 +580,8 @@ fun VideoPlayerView(
                         stepIndex = null
                         stepBitmap = null
                         stepBitmapIndex = null
-                        frameCache = null
-                        exoPlayer.seekTo(cache.positionMsFor(target))
+                        frameServer = null
+                        exoPlayer.seekTo(cache.timeline.seekPositionMs(target))
                     }
                 } else {
                     if (stepIndex == target) {
@@ -514,30 +606,49 @@ fun VideoPlayerView(
      * decoding a probe frame for each of them would cost more than the feature saves.
      */
     val beginStepping: () -> Unit = {
-        if (!frameCacheChecked) {
-            frameCacheChecked = true
+        if (!frameServerChecked) {
+            frameServerChecked = true
             coroutineScope.launch {
-                val opened = VideoFrameCache.open(
-                    context = context,
-                    uri = mediaItem.uri,
-                    maxWidth = maxOf(playerSizePx.width, 1),
-                    maxHeight = maxOf(playerSizePx.height, 1)
-                )
+                val times = timelineLoad.await()
+                val opened = times?.let {
+                    FrameServer.open(
+                        context = context.applicationContext,
+                        uri = mediaItem.uri,
+                        timeline = it,
+                        maxWidth = max(playerSizePx.width, 1),
+                        maxHeight = max(playerSizePx.height, 1)
+                    )
+                }
                 val steps = queuedSteps
                 queuedSteps = 0
-                frameCache = opened
-                frameCacheOpened = true
+                frameServer = opened
+                frameServerOpened = true
                 if (opened != null) {
-                    val index = (shownFrameIndex(opened) + steps).coerceIn(0, opened.lastIndex)
+                    val index = (shownFrameIndex(opened.timeline) + steps).coerceIn(0, opened.lastIndex)
+                    // The one line that shows whether the player's clock and the file's frame
+                    // times agree — they must, or every walk starts on the wrong frame
+                    Log.d(
+                        "VideoWalk",
+                        "walk starts at frame $index (+$steps banked): player drew " +
+                            "${lastFrameUs.get()} us, frame is at ${opened.timeline.timeUs(index - steps)} us"
+                    )
                     stepIndex = index
-                    currentPositionMs = opened.positionMsFor(index)
+                    currentPositionMs = opened.timeline.seekPositionMs(index)
                     val decoded = opened.frameAt(index, if (steps < 0) -1 else 1)
-                    if (stepIndex == index) {
-                        stepBitmap = decoded
-                        stepBitmapIndex = index
-                    }
-                    prefetchJob = coroutineScope.launch {
-                        opened.prefetch(index, if (steps < 0) -1 else 1)
+                    if (decoded == null) {
+                        // The phone's decoder will not take this file. Leave the walk to the
+                        // player, which has the software decoder to fall back on.
+                        if (stepIndex == index) stepIndex = null
+                        frameServer = null
+                        if (steps != 0) seekStepFrames(shownPositionMs(), steps)
+                    } else {
+                        if (stepIndex == index) {
+                            stepBitmap = decoded
+                            stepBitmapIndex = index
+                        }
+                        prefetchJob = coroutineScope.launch {
+                            opened.prefetch(index, if (steps < 0) -1 else 1)
+                        }
                     }
                 } else if (steps != 0) {
                     // No frame-index access on this file: the banked steps are owed either way
@@ -563,7 +674,6 @@ fun VideoPlayerView(
         if (exoPlayer.isScrubbingModeEnabled) exoPlayer.setScrubbingModeEnabled(false)
         leaveStepping(true)
         exoPlayer.play()
-        onFrameWalkChange(false)
     }
 
     val captureFrame: () -> Unit = {
@@ -578,16 +688,22 @@ fun VideoPlayerView(
                 )
             }
 
-            // Capture frame immediately
+            // While stepping, the player is still parked where the walk began; the frame the
+            // user is looking at — and means to capture — is the stepped-to one, and its still
+            // is already in hand. Otherwise it is the frame the player last drew, copied off
+            // its surface, at the time the player reported for it (the clock only approximates).
+            val walked = stepIndex
+            val times = frameServer?.timeline ?: timeline
+            val frameUs = when {
+                walked != null && times != null -> times.timeUs(walked)
+                times != null -> times.timeUs(shownFrameIndex(times))
+                else -> lastFrameUs.get().takeIf { it >= 0L } ?: (exoPlayer.currentPosition * 1000)
+            }
+            val onScreen = if (walked != null) stepBitmap else surfaceViewRef?.let { copySurface(it) }
             snapshotManager.captureCurrentFrame(
-                textureView = textureViewRef,
+                instantFrame = onScreen,
                 videoItem = mediaItem,
-                // While stepping, the player is still parked where the walk began; the frame
-                // the user is looking at — and means to capture — is the stepped-to one.
-                // Otherwise it is the frame the player last drew, which the clock only
-                // approximates.
-                currentPositionMs = stepIndex?.let { frameCache?.positionMsFor(it) }
-                    ?: shownPositionMs()
+                framePositionUs = frameUs
             ) { thumbnail ->
                 capturedThumb = thumbnail
                 captureCount++
@@ -619,11 +735,7 @@ fun VideoPlayerView(
                     useController = false
                     player = exoPlayer
 
-                    // Find the underlying TextureView for frame extraction
-                    post {
-                        val tv = findTextureView(this)
-                        textureViewRef = tv
-                    }
+                    surfaceViewRef = videoSurfaceView as? SurfaceView
                 }
             },
             modifier = Modifier.fillMaxSize()
@@ -649,6 +761,19 @@ fun VideoPlayerView(
                 contentDescription = null,
                 contentScale = ContentScale.Fit,
                 modifier = Modifier.fillMaxSize()
+            )
+        }
+
+        playbackError?.let { message ->
+            Text(
+                text = message,
+                color = GhostContent,
+                fontSize = 14.sp,
+                textAlign = TextAlign.Center,
+                style = GhostTextStyle,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(horizontal = 32.dp)
             )
         }
 
@@ -734,7 +859,7 @@ fun VideoPlayerView(
                     // same frame, still decoding". It updates the instant the button is
                     // released, ahead of the picture.
                     val walkedIndex = stepIndex
-                    val cacheForStats = frameCache
+                    val cacheForStats = frameServer
                     val walking = walkedIndex != null && cacheForStats != null
                     val readout: Pair<String, String>? =
                         if (walkedIndex != null && cacheForStats != null) {
@@ -744,7 +869,14 @@ fun VideoPlayerView(
                             "frame" to "${walkedIndex + 1} / ${cacheForStats.frameCount}" +
                                 if (catchingUp) " …" else ""
                         } else {
-                            formatClipStats(durationMs, frameRate, cacheForStats?.frameCount ?: 0)
+                            // The file's own count and rate once they are read; until then
+                            // (or for a file that cannot be read that way) what the player says
+                            val times = timeline
+                            formatClipStats(
+                                durationMs = durationMs,
+                                frameRate = times?.averageFrameRate?.takeIf { it > 0f } ?: frameRate,
+                                exactFrameCount = times?.frameCount ?: 0
+                            )
                         }
                     Column(
                         modifier = Modifier
@@ -781,7 +913,7 @@ fun VideoPlayerView(
                             exoPlayer.pause()
                             beginStepping()
                             // Only the fallback path seeks, and only it needs a warm codec
-                            if (frameCache == null) beginScrub()
+                            if (frameServer == null) beginScrub()
                         },
                         onStepFrames = { frames ->
                             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
@@ -838,8 +970,6 @@ fun VideoPlayerView(
                                 stepJob?.cancel()
                                 stepIndex = null
                                 parkedIndex = null
-                                // The walk is over, so the host's chrome may come back
-                                onFrameWalkChange(false)
                             }
                             // Same warm-codec path the fallback frame steps use: a drag is
                             // dozens of exact seeks in a row
@@ -858,14 +988,33 @@ fun VideoPlayerView(
                                 // Land on a frame boundary where the boundaries are known, so a
                                 // walk started right after a drag begins on the frame that is
                                 // actually on screen rather than the one before it.
-                                val cache = frameCache
-                                val settledMs = if (cache != null) {
-                                    cache.positionMsFor(cache.nearestIndexFor(dragged.toLong()))
+                                val times = timeline
+                                val settledIndex = times?.nearestIndexMs(dragged.toLong())
+                                val settledMs = if (times != null && settledIndex != null) {
+                                    times.seekPositionMs(settledIndex)
                                 } else {
                                     dragged.toLong()
                                 }
                                 currentPositionMs = settledMs
+                                stepAnchorMs = settledMs
                                 if (settledMs != dragged.toLong()) exoPlayer.seekTo(settledMs)
+                                // Dragged to the very end: rest on the last frame. The video
+                                // loops, so carrying on playing from here would put the user at
+                                // the start a moment after they asked for the end.
+                                val atEnd = if (times != null) settledIndex == times.lastIndex
+                                else dragged >= durationMs - 1f
+                                if (atEnd) exoPlayer.pause()
+                                // Have the frames around the landing spot decoded before the
+                                // first step is asked for. A pause does this; a drag used to
+                                // leave the first tap after it to pay for the whole decode.
+                                val server = frameServer
+                                if (server != null && settledIndex != null && !exoPlayer.playWhenReady) {
+                                    prefetchJob?.cancel()
+                                    prefetchJob = coroutineScope.launch {
+                                        server.frameAt(settledIndex, 1)
+                                        server.prefetch(settledIndex, -1)
+                                    }
+                                }
                             }
                             seekPositionMs = null
                             endScrub()
@@ -1058,14 +1207,41 @@ private fun formatClipStats(durationMs: Long, frameRate: Float, exactFrameCount:
     return "$rate fps" to String.format(Locale.US, "%,d frames", frames)
 }
 
-private fun findTextureView(viewGroup: ViewGroup): TextureView? {
-    for (i in 0 until viewGroup.childCount) {
-        val child = viewGroup.getChildAt(i)
-        if (child is TextureView) return child
-        if (child is ViewGroup) {
-            val found = findTextureView(child)
-            if (found != null) return found
-        }
+/**
+ * A copy of what [surfaceView] is showing right now, small enough for the capture badge, or
+ * null if the surface has nothing to give (not created yet, or protected content).
+ */
+private suspend fun copySurface(surfaceView: SurfaceView): Bitmap? {
+    val width = surfaceView.width
+    val height = surfaceView.height
+    if (width <= 0 || height <= 0 || !surfaceView.holder.surface.isValid) return null
+    val scale = (BADGE_COPY_MAX_PX.toFloat() / max(width, height)).coerceAtMost(1f)
+    val copy = Bitmap.createBitmap(
+        (width * scale).roundToInt().coerceAtLeast(1),
+        (height * scale).roundToInt().coerceAtLeast(1),
+        Bitmap.Config.ARGB_8888
+    )
+    return suspendCancellableCoroutine { continuation ->
+        runCatching {
+            PixelCopy.request(surfaceView, copy, { result ->
+                continuation.resume(if (result == PixelCopy.SUCCESS) copy else null)
+            }, Handler(Looper.getMainLooper()))
+        }.onFailure { continuation.resume(null) }
     }
-    return null
+}
+
+private const val BADGE_COPY_MAX_PX = 512
+
+/** What to tell the user when the player gives up on a file. */
+private fun describePlaybackError(error: PlaybackException, mimeType: String): String {
+    val decoding = error.errorCode in
+        PlaybackException.ERROR_CODE_DECODER_INIT_FAILED..PlaybackException.ERROR_CODE_DECODING_RESOURCES_RECLAIMED
+    val reason = when {
+        decoding -> "This phone has no decoder that can play it"
+        error.errorCode == PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND -> "The file is no longer there"
+        error.errorCode in 2000..2999 -> "The file could not be read"
+        error.errorCode in 3000..3999 -> "The file is damaged or not a format this app reads"
+        else -> "Playback stopped"
+    }
+    return "Can't play this video ($mimeType)\n$reason — ${error.errorCodeName}"
 }

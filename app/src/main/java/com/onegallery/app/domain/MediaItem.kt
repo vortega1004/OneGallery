@@ -180,8 +180,11 @@ fun List<Album>.sortedBy(sort: AlbumSort): List<Album> = when (sort) {
  * Expects [this] sorted newest-first (as `MediaStoreRepository` returns it), which makes the
  * first item of each group both the album cover and its recency key.
  */
-fun List<MediaItem>.toAlbums(): List<Album> =
-    groupBy { it.bucketId }
+fun List<MediaItem>.toAlbums(): List<Album> = groupBy { it.bucketId }.toAlbums()
+
+/** [toAlbums] for a library already grouped by bucket id, each group newest-first. */
+fun Map<String, List<MediaItem>>.toAlbums(): List<Album> =
+    this
         .map { (bucketId, itemsInBucket) ->
             val newest = itemsInBucket.first()
             Album(
