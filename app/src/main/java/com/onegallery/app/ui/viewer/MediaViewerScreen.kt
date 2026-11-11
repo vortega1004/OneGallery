@@ -109,7 +109,8 @@ fun MediaViewerScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
     onVisibleItemChange: (Long) -> Unit = {},
-    onMoveRequest: (MediaItem) -> Unit = {}
+    onMoveRequest: (MediaItem) -> Unit = {},
+    onTrashRequest: (MediaItem) -> Unit = {}
 ) {
     if (mediaItems.isEmpty()) return
 
@@ -422,11 +423,15 @@ fun MediaViewerScreen(
                     horizontalArrangement = Arrangement.SpaceAround,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    IconButton(onClick = { /* Delete confirmation */ }) {
+                    // Straight to the trash, no question asked: it can be undone from the
+                    // message that follows and for thirty days from the trash itself. An item
+                    // another app handed us is not in the library and is not ours to remove.
+                    val canTrash = currentItem.id >= 0
+                    IconButton(enabled = canTrash, onClick = { onTrashRequest(currentItem) }) {
                         Icon(
                             imageVector = Icons.Rounded.Delete,
-                            contentDescription = "Delete",
-                            tint = Color.White
+                            contentDescription = "Move to trash",
+                            tint = if (canTrash) Color.White else Color(0x61FFFFFF)
                         )
                     }
                     IconButton(onClick = { /* Toggle favorite */ }) {

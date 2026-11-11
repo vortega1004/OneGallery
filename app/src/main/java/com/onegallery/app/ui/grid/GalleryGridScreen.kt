@@ -40,6 +40,7 @@ import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Checklist
 import androidx.compose.material.icons.rounded.RadioButtonUnchecked
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -123,6 +124,8 @@ fun GalleryGridScreen(
     onSelectionChange: (Set<Long>) -> Unit,
     onCreateGif: (List<MediaItem>) -> Unit,
     onMove: (List<MediaItem>) -> Unit,
+    onTrash: (List<MediaItem>) -> Unit,
+    onOpenTrash: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     // Derived from the list already in memory — no second MediaStore query.
@@ -159,7 +162,10 @@ fun GalleryGridScreen(
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                         TextButton(enabled = selectedItems.size == 2, onClick = {
                             changeSelection(selectionBetween(selectableItems.map { it.id }, selectedImageIds))
-                        }) { Text("Select between") }
+                        }) { Text("Between") }
+                        TextButton(enabled = selectedItems.isNotEmpty(), onClick = { onTrash(selectedItems) }) {
+                            Text(if (selectedItems.isEmpty()) "Trash" else "Trash (${selectedItems.size})")
+                        }
                         TextButton(enabled = selectedItems.isNotEmpty(), onClick = { onMove(selectedItems) }) {
                             Text(if (selectedItems.isEmpty()) "Move" else "Move (${selectedItems.size})")
                         }
@@ -251,6 +257,9 @@ fun GalleryGridScreen(
                             title = "Albums",
                             subtitle = albumCountLabel(albums.size, mediaItems.size),
                             trailing = {
+                                IconButton(onClick = onOpenTrash) {
+                                    Icon(Icons.Rounded.DeleteOutline, "Trash", tint = DarkTextPrimary)
+                                }
                                 SortMenu(
                                     current = albumSort,
                                     options = AlbumSort.entries,
@@ -463,7 +472,7 @@ private fun MediaGrid(
 
 @Composable
 private fun SelectionHeader(count: Int, onClose: () -> Unit) {
-    OneUIHeader("$count selected", "Hold & drag, or select two endpoints and tap Select between", trailing = {
+    OneUIHeader("$count selected", "Hold & drag, or select two endpoints and tap Between", trailing = {
         IconButton(onClick = onClose) { Icon(Icons.Rounded.Close, "Cancel selection", tint = Color.White) }
     })
 }

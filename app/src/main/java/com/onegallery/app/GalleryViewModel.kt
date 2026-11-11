@@ -1,14 +1,17 @@
 package com.onegallery.app
 
 import android.app.Application
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.onegallery.app.data.MediaMover
 import com.onegallery.app.data.MediaStoreRepository
+import com.onegallery.app.data.MediaTrash
 import com.onegallery.app.data.MoveDestination
 import com.onegallery.app.data.MoveResult
 import com.onegallery.app.data.SortPreferences
 import com.onegallery.app.data.SortPreferencesRepository
+import com.onegallery.app.data.TrashedItem
 import com.onegallery.app.domain.AlbumSort
 import com.onegallery.app.domain.MediaItem
 import com.onegallery.app.domain.MediaSort
@@ -68,6 +71,26 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
      */
     fun move(items: List<MediaItem>, destination: MoveDestination, onDone: (MoveResult) -> Unit) {
         viewModelScope.launch { onDone(mover.move(items, destination)) }
+    }
+
+    /** Launch its consent request when [com.onegallery.app.data.canMoveAnywhere] is false. */
+    val trash = MediaTrash(application)
+
+    /** Only queried while something is collecting it — that is, while the trash is open. */
+    val trashedItems: StateFlow<List<TrashedItem>> = trash.observeTrashed()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyList())
+
+    /**
+     * Trashes or restores [uris]; [onDone] gets how many changed. Like [move], this never
+     * touches [mediaItems] itself: MediaStore changes, the observer sees it, the library
+     * re-queries.
+     */
+    fun setTrashed(uris: List<Uri>, trashed: Boolean, onDone: (Int) -> Unit) {
+        viewModelScope.launch { onDone(trash.setTrashed(uris, trashed)) }
+    }
+
+    fun deleteForever(uris: List<Uri>, onDone: (Int) -> Unit) {
+        viewModelScope.launch { onDone(trash.deleteForever(uris)) }
     }
 
     /** Re-subscribes and re-queries, e.g. after the granted media permissions changed. */
