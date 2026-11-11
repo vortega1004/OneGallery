@@ -4,6 +4,7 @@ import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.onegallery.app.data.AlbumLayoutRepository
 import com.onegallery.app.data.MediaMover
 import com.onegallery.app.data.MediaStoreRepository
 import com.onegallery.app.data.MediaTrash
@@ -12,6 +13,7 @@ import com.onegallery.app.data.MoveResult
 import com.onegallery.app.data.SortPreferences
 import com.onegallery.app.data.SortPreferencesRepository
 import com.onegallery.app.data.TrashedItem
+import com.onegallery.app.domain.AlbumLayout
 import com.onegallery.app.domain.AlbumSort
 import com.onegallery.app.domain.MediaItem
 import com.onegallery.app.domain.MediaSort
@@ -19,6 +21,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -53,6 +56,26 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
      */
     val sortPreferences: StateFlow<SortPreferences> = sortPreferencesRepository.preferences
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), SortPreferences())
+
+    private val albumLayoutRepository = AlbumLayoutRepository(application)
+
+    // The arrangement the user just made, shown at once. Without it a dropped tile would jump
+    // back to where it came from for the moment it takes the write to reach disk and return.
+    private val editedLayout = MutableStateFlow<AlbumLayout?>(null)
+
+    /**
+     * How the album list is arranged. Null until the saved arrangement has been read — which
+     * matters: "nothing saved yet" is when the first arrangement is seeded from the old sort
+     * order, and mistaking "not read yet" for it would overwrite a saved one.
+     */
+    val albumLayout: StateFlow<AlbumLayout?> =
+        combine(albumLayoutRepository.layout, editedLayout) { saved, edited -> edited ?: saved }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), null)
+
+    fun setAlbumLayout(layout: AlbumLayout) {
+        editedLayout.value = layout
+        viewModelScope.launch { albumLayoutRepository.save(layout) }
+    }
 
     fun setAlbumSort(sort: AlbumSort) {
         viewModelScope.launch { sortPreferencesRepository.setAlbumSort(sort) }

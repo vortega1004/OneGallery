@@ -227,6 +227,8 @@ fun GalleryApp(viewModel: GalleryViewModel, messages: SnackbarHostState) {
     // in the composition, so state owned by the grid would be discarded every time a photo is
     // opened. Holding it here is what makes back-from-viewer return to the album you were in.
     var openedAlbumId by rememberSaveable { mutableStateOf<String?>(null) }
+    // The group the user is inside, if any. An album opened from a group returns to it.
+    var openedGroupId by rememberSaveable { mutableStateOf<String?>(null) }
     var columnCount by rememberSaveable { mutableIntStateOf(3) }
 
     // Grid scroll positions live here for the same reason as the state above: the grid is
@@ -234,6 +236,7 @@ fun GalleryApp(viewModel: GalleryViewModel, messages: SnackbarHostState) {
     // top of the library every time the user opened a photo.
     val albumGridState = rememberLazyGridState()
     val albumListGridState = rememberLazyGridState()
+    val groupGridState = rememberLazyGridState()
     val scope = rememberCoroutineScope()
 
     // Which album the viewer was opened from
@@ -249,7 +252,7 @@ fun GalleryApp(viewModel: GalleryViewModel, messages: SnackbarHostState) {
     // start and not just the viewer. Media sort is per album — `mediaSortFor` falls back to the
     // last order chosen anywhere for folders the user has never sorted. See `SortPreferences`.
     val sortPreferences by viewModel.sortPreferences.collectAsStateWithLifecycle()
-    val albumSort = sortPreferences.albumSort
+    val albumLayout by viewModel.albumLayout.collectAsStateWithLifecycle()
     val mediaSort = sortPreferences.mediaSortFor(openedAlbumId)
 
     // Scope the pager to the set the user was actually looking at, so swiping inside an album
@@ -463,17 +466,17 @@ fun GalleryApp(viewModel: GalleryViewModel, messages: SnackbarHostState) {
                 restoreToItemId = restoreToItemId,
                 onRestoreHandled = { restoreToItemId = null },
                 albumListGridState = albumListGridState,
-                albumSort = albumSort,
-                // Changing the sort must jump back to the top. LazyGrid keys are stable, so it
-                // otherwise anchors whatever item was first visible and follows it to its new
-                // position — picking "Name (Z-A)" would leave you in the middle of the list.
-                // Done here as an explicit event rather than a LaunchedEffect on the sort value,
-                // which would also fire when returning from the viewer and fight the
-                // restore-to-item scroll.
-                onAlbumSortChange = {
-                    viewModel.setAlbumSort(it)
-                    scope.launch { albumListGridState.scrollToTopAfterReorder() }
+                albumLayout = albumLayout,
+                onAlbumLayoutChange = viewModel::setAlbumLayout,
+                initialAlbumSort = sortPreferences.albumSort,
+                openedGroupId = openedGroupId,
+                onOpenGroup = { groupId ->
+                    if (groupId != null && groupId != openedGroupId) {
+                        scope.launch { groupGridState.scrollToItem(0) }
+                    }
+                    openedGroupId = groupId
                 },
+                groupGridState = groupGridState,
                 mediaSort = mediaSort,
                 selectionMode = selectionMode,
                 selectedImageIds = selectedImageIds.toSet(),

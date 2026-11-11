@@ -41,6 +41,7 @@ import androidx.compose.material.icons.rounded.Checklist
 import androidx.compose.material.icons.rounded.RadioButtonUnchecked
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -57,6 +58,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -71,7 +73,17 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import com.onegallery.app.domain.Album
+import com.onegallery.app.domain.AlbumEntry
+import com.onegallery.app.domain.AlbumLayout
 import com.onegallery.app.domain.AlbumSort
+import com.onegallery.app.domain.arrangeAlbums
+import com.onegallery.app.domain.arrangedBy
+import com.onegallery.app.domain.grouping
+import com.onegallery.app.domain.removingFromGroup
+import com.onegallery.app.domain.renamingGroup
+import com.onegallery.app.domain.ungrouping
+import com.onegallery.app.domain.withGroupOrder
+import com.onegallery.app.domain.withOrder
 import com.onegallery.app.domain.MediaSort
 import com.onegallery.app.domain.forAlbum
 import com.onegallery.app.domain.sortedBy
@@ -113,8 +125,13 @@ fun GalleryGridScreen(
     restoreToItemId: Long?,
     onRestoreHandled: () -> Unit,
     albumListGridState: LazyGridState,
-    albumSort: AlbumSort,
-    onAlbumSortChange: (AlbumSort) -> Unit,
+    albumLayout: AlbumLayout?,
+    onAlbumLayoutChange: (AlbumLayout) -> Unit,
+    /** The order the album list starts in, the first time, before the user has arranged it. */
+    initialAlbumSort: AlbumSort,
+    openedGroupId: String?,
+    onOpenGroup: (String?) -> Unit,
+    groupGridState: LazyGridState,
     mediaSort: MediaSort,
     onMediaSortChange: (MediaSort) -> Unit,
     onItemClick: (albumId: String, index: Int) -> Unit,
@@ -129,10 +146,44 @@ fun GalleryGridScreen(
     modifier: Modifier = Modifier
 ) {
     // Derived from the list already in memory — no second MediaStore query.
-    val albums = remember(mediaItems, albumSort) { mediaItems.toAlbums().sortedBy(albumSort) }
+    val albums = remember(mediaItems) { mediaItems.toAlbums() }
     val openedAlbum = remember(albums, openedAlbumId) {
         albums.firstOrNull { it.id == openedAlbumId }
     }
+
+    // --- The album list, as the user arranged it ------------------------------------------
+    // Until an arrangement exists the list shows in the old sort order, and that order is
+    // then saved as the first arrangement — from which point only the user changes it.
+    val layout = albumLayout ?: AlbumLayout()
+    val unarranged = layout.order.isEmpty() && layout.groups.isEmpty()
+    val entries: List<AlbumEntry> = remember(albums, layout, initialAlbumSort) {
+        if (unarranged) albums.sortedBy(initialAlbumSort).map { AlbumEntry.Single(it) }
+        else arrangeAlbums(albums, layout)
+    }
+    LaunchedEffect(albumLayout, albums.isNotEmpty()) {
+        if (albumLayout != null && unarranged && albums.isNotEmpty()) {
+            onAlbumLayoutChange(layout.withOrder(entries.map { it.key }))
+        }
+    }
+    val openedGroup = remember(entries, openedGroupId) {
+        entries.firstOrNull { it is AlbumEntry.Group && it.id == openedGroupId } as? AlbumEntry.Group
+    }
+    // The group was taken apart, or its last album left, while it was open
+    LaunchedEffect(openedGroup == null, openedGroupId) {
+        if (openedGroupId != null && openedGroup == null && albumLayout != null && albums.isNotEmpty()) {
+            onOpenGroup(null)
+        }
+    }
+
+    // Ticking albums, to group them or take them out of a group. Tile keys, not ids.
+    var albumSelecting by rememberSaveable { mutableStateOf(false) }
+    var selectedAlbumKeys by rememberSaveable { mutableStateOf(listOf<String>()) }
+    val clearAlbumSelection = { albumSelecting = false; selectedAlbumKeys = emptyList() }
+    val toggleAlbumSelected: (String) -> Unit = { key ->
+        selectedAlbumKeys = if (key in selectedAlbumKeys) selectedAlbumKeys - key else selectedAlbumKeys + key
+    }
+    // null = no dialog; otherwise what the name is for
+    var namingGroup by remember { mutableStateOf<GroupNaming?>(null) }
     // Everything is selectable: selection serves moving as well as GIFs. The GIF creator takes
     // the stills out of it and ignores the rest.
     val selectableItems = remember(mediaItems, openedAlbumId, mediaSort) {
@@ -149,15 +200,59 @@ fun GalleryGridScreen(
         if (selectedImageIds.any { it !in available }) onSelectionChange(selectedImageIds.intersect(available))
     }
 
-    // Inside an album, back returns to the folder list rather than leaving the screen.
+    // Back climbs one level: album -> its group (if it was opened from one) -> the album list.
+    // Later handlers win, so the most specific is declared last.
+    BackHandler(enabled = openedGroup != null && openedAlbum == null) { onOpenGroup(null) }
     BackHandler(enabled = openedAlbum != null) { onOpenAlbum(null) }
     BackHandler(enabled = selectionMode) { clearSelection() }
+    BackHandler(enabled = albumSelecting) { clearAlbumSelection() }
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
         containerColor = DarkBackground,
         bottomBar = {
-            if (selectionMode) {
+            if (albumSelecting && openedAlbum == null) {
+                NavigationBar(containerColor = DarkSurface) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                        val inGroup = openedGroup
+                        if (inGroup != null) {
+                            TextButton(enabled = selectedAlbumKeys.isNotEmpty(), onClick = {
+                                onAlbumLayoutChange(
+                                    layout.removingFromGroup(
+                                        groupId = inGroup.id,
+                                        albumIds = selectedAlbumKeys.map { it.removePrefix("a:") }.toSet(),
+                                        visibleOrder = entries.map { it.key }
+                                    )
+                                )
+                                clearAlbumSelection()
+                            }) {
+                                Text(
+                                    if (selectedAlbumKeys.isEmpty()) "Take out of group"
+                                    else "Take out of group (${selectedAlbumKeys.size})"
+                                )
+                            }
+                        } else {
+                            val groupsPicked = selectedAlbumKeys.filter { it.startsWith("g:") }
+                            TextButton(enabled = selectedAlbumKeys.size >= 2, onClick = {
+                                // Adding to an existing group keeps its name unless changed
+                                val existing = entries.firstOrNull { it.key in groupsPicked } as? AlbumEntry.Group
+                                namingGroup = GroupNaming.New(selectedAlbumKeys.toSet(), existing?.name.orEmpty())
+                            }) {
+                                Text(if (selectedAlbumKeys.size < 2) "Group" else "Group (${selectedAlbumKeys.size})")
+                            }
+                            TextButton(enabled = groupsPicked.isNotEmpty(), onClick = {
+                                onAlbumLayoutChange(
+                                    layout.ungrouping(
+                                        groupsPicked.map { it.removePrefix("g:") }.toSet(),
+                                        entries.map { it.key }
+                                    )
+                                )
+                                clearAlbumSelection()
+                            }) { Text("Ungroup") }
+                        }
+                    }
+                }
+            } else if (selectionMode) {
                 NavigationBar(containerColor = DarkSurface) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                         TextButton(enabled = selectedItems.size == 2, onClick = {
@@ -187,14 +282,10 @@ fun GalleryGridScreen(
         // live MediaStore update (which changes the Album object's counts) from being mistaken
         // for a navigation and re-running the transition.
         AnimatedContent(
-            targetState = GridDestination(album = openedAlbum),
+            targetState = GridDestination(album = openedAlbum, group = openedGroup),
             contentKey = { it.key },
             transitionSpec = {
-                val direction = when {
-                    targetState.album != null && initialState.album == null -> 1
-                    targetState.album == null && initialState.album != null -> -1
-                    else -> 0
-                }
+                val direction = (targetState.depth - initialState.depth).coerceIn(-1, 1)
                 (fadeIn(tween(DESTINATION_ENTER_MS)) +
                     slideInHorizontally(tween(DESTINATION_ENTER_MS)) { direction * it / 8 })
                     .togetherWith(
@@ -208,6 +299,7 @@ fun GalleryGridScreen(
                 .padding(innerPadding)
         ) { destination ->
             val album = destination.album
+            val group = destination.group
 
             Column(modifier = Modifier.fillMaxSize()) {
                 when {
@@ -252,38 +344,162 @@ fun GalleryGridScreen(
                         )
                     }
 
-                    else -> {
-                        OneUIHeader(
-                            title = "Albums",
-                            subtitle = albumCountLabel(albums.size, mediaItems.size),
-                            trailing = {
-                                IconButton(onClick = onOpenTrash) {
-                                    Icon(Icons.Rounded.DeleteOutline, "Trash", tint = DarkTextPrimary)
+                    group != null -> {
+                        // The albums of one group. The tiles come from the live list, not from
+                        // the destination, so a reorder or a removal shows at once; the
+                        // destination's copy is what is drawn while this animates out.
+                        val shown = (openedGroup ?: group).albums.map { AlbumEntry.Single(it) }
+                        if (albumSelecting) {
+                            SelectionHeader(selectedAlbumKeys.size, "Tap albums to take them out of this group", clearAlbumSelection)
+                        } else {
+                            OneUIHeader(
+                                title = group.name,
+                                subtitle = albumCountLabel(shown.size, shown.sumOf { it.album.count }),
+                                onBack = { onOpenGroup(null) },
+                                trailing = {
+                                    IconButton(onClick = { albumSelecting = true }) {
+                                        Icon(Icons.Rounded.Checklist, "Select albums", tint = DarkTextPrimary)
+                                    }
+                                    GroupMenu(
+                                        onRename = { namingGroup = GroupNaming.Rename(group.id, group.name) },
+                                        onUngroup = {
+                                            onAlbumLayoutChange(layout.ungrouping(setOf(group.id), entries.map { it.key }))
+                                        }
+                                    )
                                 }
-                                SortMenu(
-                                    current = albumSort,
-                                    options = AlbumSort.entries,
-                                    label = { it.label },
-                                    contentDescription = "Sort albums",
-                                    onSelect = onAlbumSortChange
+                            )
+                        }
+                        AlbumEntryGrid(
+                            entries = shown,
+                            gridState = groupGridState,
+                            selecting = albumSelecting,
+                            selectedKeys = selectedAlbumKeys.toSet(),
+                            onToggleSelected = toggleAlbumSelected,
+                            onOpen = { entry -> if (entry is AlbumEntry.Single) onOpenAlbum(entry.album.id) },
+                            onReorder = { keys ->
+                                onAlbumLayoutChange(
+                                    layout.withGroupOrder(group.id, keys.map { it.removePrefix("a:") })
                                 )
                             }
                         )
-                        AlbumGrid(
-                            albums = albums,
+                    }
+
+                    else -> {
+                        if (albumSelecting) {
+                            SelectionHeader(selectedAlbumKeys.size, "Tap albums to put them in a group", clearAlbumSelection)
+                        } else {
+                            OneUIHeader(
+                                title = "Albums",
+                                subtitle = albumCountLabel(albums.size, mediaItems.size),
+                                trailing = {
+                                    IconButton(onClick = { albumSelecting = true }) {
+                                        Icon(Icons.Rounded.Checklist, "Select albums", tint = DarkTextPrimary)
+                                    }
+                                    IconButton(onClick = onOpenTrash) {
+                                        Icon(Icons.Rounded.DeleteOutline, "Trash", tint = DarkTextPrimary)
+                                    }
+                                    // A one-off: puts the tiles in that order now. It does not
+                                    // stay "sorted" — the order is the user's again afterwards.
+                                    SortMenu(
+                                        current = null,
+                                        options = AlbumSort.entries,
+                                        label = { it?.label.orEmpty() },
+                                        contentDescription = "Arrange albums by",
+                                        onSelect = { sort ->
+                                            if (sort != null) {
+                                                onAlbumLayoutChange(layout.withOrder(entries.arrangedBy(sort).map { it.key }))
+                                            }
+                                        }
+                                    )
+                                }
+                            )
+                        }
+                        AlbumEntryGrid(
+                            entries = entries,
                             gridState = albumListGridState,
-                            onAlbumClick = { onOpenAlbum(it.id) }
+                            selecting = albumSelecting,
+                            selectedKeys = selectedAlbumKeys.toSet(),
+                            onToggleSelected = toggleAlbumSelected,
+                            onOpen = { entry ->
+                                when (entry) {
+                                    is AlbumEntry.Single -> onOpenAlbum(entry.album.id)
+                                    is AlbumEntry.Group -> onOpenGroup(entry.id)
+                                }
+                            },
+                            onReorder = { keys -> onAlbumLayoutChange(layout.withOrder(keys)) }
                         )
                     }
                 }
             }
         }
     }
+
+    namingGroup?.let { naming ->
+        GroupNameDialog(
+            title = if (naming is GroupNaming.New) "Group albums" else "Rename group",
+            initialName = naming.initialName,
+            confirmLabel = if (naming is GroupNaming.New) "Group" else "Rename",
+            onConfirm = { name ->
+                when (naming) {
+                    is GroupNaming.New -> {
+                        onAlbumLayoutChange(
+                            layout.grouping(
+                                keys = naming.keys,
+                                name = name,
+                                newGroupId = System.currentTimeMillis().toString(36),
+                                visibleOrder = entries.map { it.key }
+                            )
+                        )
+                        clearAlbumSelection()
+                    }
+                    is GroupNaming.Rename -> onAlbumLayoutChange(layout.renamingGroup(naming.groupId, name))
+                }
+                namingGroup = null
+            },
+            onDismiss = { namingGroup = null }
+        )
+    }
 }
 
-/** Where the grid screen is: inside [album], or on the album list when it is null. */
-private data class GridDestination(val album: Album?) {
-    val key: String get() = if (album != null) "album:${album.id}" else "albums"
+/** What the group-name dialog is open for. */
+private sealed interface GroupNaming {
+    val initialName: String
+
+    data class New(val keys: Set<String>, override val initialName: String) : GroupNaming
+    data class Rename(val groupId: String, override val initialName: String) : GroupNaming
+}
+
+@Composable
+private fun GroupMenu(onRename: () -> Unit, onUngroup: () -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { expanded = true }) {
+            Icon(Icons.Rounded.MoreVert, "Group options", tint = DarkTextPrimary)
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, containerColor = DarkSurface) {
+            DropdownMenuItem(
+                text = { Text("Rename group", color = DarkTextPrimary) },
+                onClick = { expanded = false; onRename() }
+            )
+            DropdownMenuItem(
+                text = { Text("Ungroup", color = DarkTextPrimary) },
+                onClick = { expanded = false; onUngroup() }
+            )
+        }
+    }
+}
+
+/** Where the grid screen is: inside [album], inside [group], or on the album list. */
+private data class GridDestination(val album: Album?, val group: AlbumEntry.Group?) {
+    val key: String
+        get() = when {
+            album != null -> "album:${album.id}"
+            group != null -> "group:${group.id}"
+            else -> "albums"
+        }
+
+    /** How far in: decides which way the transition slides. */
+    val depth: Int get() = if (album != null) 2 else if (group != null) 1 else 0
 }
 
 private const val DESTINATION_ENTER_MS = 200
@@ -298,69 +514,7 @@ private fun albumCountLabel(albumCount: Int, itemCount: Int): String {
 }
 
 @Composable
-private fun AlbumGrid(
-    albums: List<Album>,
-    gridState: LazyGridState,
-    onAlbumClick: (Album) -> Unit
-) {
-    if (albums.isEmpty()) {
-        EmptyState("No folders found.")
-        return
-    }
-
-    LazyVerticalGrid(
-        state = gridState,
-        columns = GridCells.Fixed(2),
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-        modifier = Modifier.fillMaxSize()
-    ) {
-        items(items = albums, key = { it.id }) { album ->
-            AlbumCell(album = album, onClick = { onAlbumClick(album) })
-        }
-    }
-}
-
-@Composable
-private fun AlbumCell(
-    album: Album,
-    onClick: () -> Unit
-) {
-    Column(modifier = Modifier.clickable(onClick = onClick)) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(1f)
-                .clip(RoundedCornerShape(16.dp))
-                .background(Color(0xFF1F2125))
-        ) {
-            AsyncImage(
-                model = album.coverUri,
-                contentDescription = album.name,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
-            )
-        }
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = album.name,
-            color = DarkTextPrimary,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Medium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-        Text(
-            text = "${album.count}",
-            color = DarkTextSecondary,
-            fontSize = 12.sp
-        )
-    }
-}
-
-@Composable
-private fun EmptyState(message: String) {
+internal fun EmptyState(message: String) {
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
@@ -471,8 +625,14 @@ private fun MediaGrid(
 }
 
 @Composable
-private fun SelectionHeader(count: Int, onClose: () -> Unit) {
-    OneUIHeader("$count selected", "Hold & drag, or select two endpoints and tap Between", trailing = {
+private fun SelectionHeader(
+    count: Int,
+    onClose: () -> Unit
+) = SelectionHeader(count, "Hold & drag, or select two endpoints and tap Between", onClose)
+
+@Composable
+private fun SelectionHeader(count: Int, hint: String, onClose: () -> Unit) {
+    OneUIHeader("$count selected", hint, trailing = {
         IconButton(onClick = onClose) { Icon(Icons.Rounded.Close, "Cancel selection", tint = Color.White) }
     })
 }
