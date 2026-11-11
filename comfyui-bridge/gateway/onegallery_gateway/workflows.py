@@ -1,26 +1,58 @@
 """The jobs folder: which workflow files can be run from the phone, and how a job is built.
 
-Pure functions over plain dicts - no network, no ComfyUI - so every rule here is unit-tested.
+No network here, so every rule is unit-tested.
 
 The folder *is* the list. Drop an API-format workflow in and its file name becomes a job on the
-phone; delete it and the job goes. Nothing else has to be edited.
+phone; delete it and the job goes. Nothing else has to be edited: what the phone may change
+(prompt, seed, sampler settings, models, LoRAs) is read from the workflow itself - see
+``params``. A ``<name>.options.json`` beside it can describe the job, limit its LoRAs to
+some folders and hide settings.
 """
 
 from __future__ import annotations
 
-import copy
 import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import params as P
+
 IMAGE_NODE = "OneGalleryImageInput"
 PROMPT_NODE = "OneGalleryPrompt"
 OUTPUT_NODE = "OneGallerySendBack"
+OPTIONS_SUFFIX = ".options.json"
 
-#: Largest seed handed to ComfyUI. Below 2**53 so it survives a trip through JavaScript.
-MAX_SEED = 2**48
-SEED_INPUTS = ("seed", "noise_seed")
+MAX_SEED = P.MAX_SEED
+
+
+@dataclass
+class Options:
+    """``<job name>.options.json`` beside a workflow - everything in it is optional.
+
+    ``description``   one line shown under the job's name on the phone
+    ``lora_folders``  sub-folders of ``models/loras`` whose LoRAs this job offers ("wan", "qwen/edit")
+    ``hide``          ids of settings the phone should not show (``check`` lists them)
+    """
+
+    description: str = ""
+    lora_folders: list[str] | None = None
+    hide: list[str] = field(default_factory=list)
+
+    @staticmethod
+    def read(path: Path) -> "Options":
+        try:
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            return Options()
+        if not isinstance(data, dict):
+            return Options()
+        folders = data.get("lora_folders")
+        return Options(
+            description=str(data.get("description") or "")[:200],
+            lora_folders=[str(f) for f in folders] if isinstance(folders, list) else None,
+            hide=[h for h in data.get("hide") or [] if isinstance(h, str)],
+        )
 
 
 @dataclass
@@ -32,28 +64,75 @@ class Workflow:
     description: str = ""
     #: Nodes that receive the phone's photo. Empty: the job takes no photo.
     image_nodes: list[str] = field(default_factory=list)
-    #: The node whose text the phone may replace, if the workflow has one.
-    prompt_node: str | None = None
-    prompt_default: str = ""
     #: Nodes whose results go back to the phone. Empty: everything the workflow saves.
     output_nodes: list[str] = field(default_factory=list)
+    analysis: P.Analysis = field(default_factory=P.Analysis)
+    options: Options = field(default_factory=Options)
 
     @property
     def requires_image(self) -> bool:
         return bool(self.image_nodes)
 
-    def describe(self) -> dict:
+    @property
+    def params(self) -> list[P.Param]:
+        hidden = set(self.options.hide)
+        return [p for p in self.analysis.params if p.id not in hidden]
+
+    @property
+    def prompt(self) -> P.Param | None:
+        return next((p for p in self.params if p.id == "prompt"), None)
+
+    def lora_folders(self) -> list[str] | None:
+        """The folders this job's LoRAs come from; None for all of them."""
+        if self.options.lora_folders is not None:
+            return [f.replace("\\", "/").strip("/") for f in self.options.lora_folders]
+        used = self.analysis.lora_folders_used
+        # The LoRAs it already loads all sit in sub-folders: offer those folders
+        if used and all(used):
+            return list(used)
+        return None
+
+    def available_loras(self, all_loras: list[str]) -> list[str]:
+        folders = self.lora_folders()
+        if folders is None:
+            return list(all_loras)
+        wanted = [f.lower() for f in folders]
+        found = []
+        for name in all_loras:
+            folder = P.lora_folder(name).lower()
+            if any(folder == w or (w and folder.startswith(w + "/")) for w in wanted):
+                found.append(name)
+        return found
+
+    def describe(
+        self, models: P.ModelLists | None = None, all_loras: list[str] | None = None, randomize_seeds: bool = True
+    ) -> dict:
         """What the phone is told about this job."""
+        params = []
+        for param in self.params:
+            shown = param.describe(models)
+            if param.kind == "seed":
+                shown["mode"] = "random" if randomize_seeds else "fixed"
+            params.append(shown)
         described = {
             "id": self.id,
             "name": self.name,
             "description": self.description,
             "requires_image": self.requires_image,
             "accepted_mime_types": ["image/jpeg", "image/png", "image/webp"] if self.requires_image else [],
+            "params": params,
         }
-        if self.prompt_node is not None:
-            # The phone shows `default` greyed out in the text box; typing replaces it
-            described["prompt"] = {"editable": True, "default": self.prompt_default}
+        targets = self.analysis.lora_targets
+        described["loras"] = {
+            "can_add": bool(targets),
+            "folders": self.lora_folders(),
+            "available": self.available_loras(all_loras or []) if targets else [],
+            "targets": [{"id": t.id, "label": t.label} for t in targets],
+        }
+        prompt = self.prompt
+        if prompt is not None:
+            # For a phone that predates "params": the workflow's own prompt, shown greyed out
+            described["prompt"] = {"editable": True, "default": prompt.default}
         return described
 
 
@@ -89,47 +168,22 @@ def _title(node: dict) -> str:
     return (meta.get("title") or "") if isinstance(meta, dict) else ""
 
 
-def _by_number(node_id: str):
-    """Node ids are numbers in practice; sort them as numbers so "10" comes after "9"."""
-    return (0, int(node_id)) if node_id.isdigit() else (1, node_id)
+_by_number = P.by_number
 
 
-def analyse(graph: dict) -> tuple[list[str], str | None, str, list[str]]:
-    """Finds where the photo goes, where the prompt goes and what comes back.
-
-    The OneGallery nodes are looked for first. A workflow without them still works: the photo
-    goes to a Load Image titled "Phone ..." (or, failing that, the first Load Image), the prompt
-    to a node titled "Phone Prompt ..." that has a text input, and everything saved comes back.
-    """
+def find_image_nodes(graph: dict) -> list[str]:
+    """Where the photo goes: Phone Image nodes; else a Load Image titled "Phone...", else the
+    first Load Image. None at all: the job takes no photo."""
     ids = sorted(graph, key=_by_number)
-
     image_nodes = [i for i in ids if graph[i]["class_type"] == IMAGE_NODE]
     if not image_nodes:
         loaders = [i for i in ids if graph[i]["class_type"] == "LoadImage"]
         titled = [i for i in loaders if _title(graph[i]).lower().startswith("phone")]
         image_nodes = titled or loaders[:1]
-
-    prompt_node = next((i for i in ids if graph[i]["class_type"] == PROMPT_NODE), None)
-    if prompt_node is None:
-        prompt_node = next(
-            (
-                i
-                for i in ids
-                if _title(graph[i]).lower().startswith("phone prompt")
-                and isinstance(graph[i]["inputs"].get("text"), str)
-            ),
-            None,
-        )
-    prompt_default = ""
-    if prompt_node is not None:
-        text = graph[prompt_node]["inputs"].get("text")
-        prompt_default = text if isinstance(text, str) else ""
-
-    output_nodes = [i for i in ids if graph[i]["class_type"] == OUTPUT_NODE]
-    return image_nodes, prompt_node, prompt_default, output_nodes
+    return image_nodes
 
 
-def load_workflows(folder: Path) -> tuple[list[Workflow], list[InvalidWorkflow]]:
+def load_workflows(folder: Path, info: P.NodeInfo | None = None) -> tuple[list[Workflow], list[InvalidWorkflow]]:
     """Every ``*.json`` in ``folder`` (not its sub-folders), as jobs or as reasons they are not."""
     workflows: list[Workflow] = []
     invalid: list[InvalidWorkflow] = []
@@ -138,6 +192,8 @@ def load_workflows(folder: Path) -> tuple[list[Workflow], list[InvalidWorkflow]]
         return workflows, invalid
 
     for path in sorted(folder.glob("*.json"), key=lambda p: p.name.lower()):
+        if path.name.lower().endswith(OPTIONS_SUFFIX):
+            continue
         try:
             data = json.loads(path.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError) as error:
@@ -161,10 +217,12 @@ def load_workflows(folder: Path) -> tuple[list[Workflow], list[InvalidWorkflow]]
             workflow_id, n = f"{base}-{n}", n + 1
         taken.add(workflow_id)
 
-        image_nodes, prompt_node, prompt_default, output_nodes = analyse(data)
+        image_nodes = find_image_nodes(data)
+        output_nodes = [i for i in sorted(data, key=_by_number) if data[i]["class_type"] == OUTPUT_NODE]
+        options = Options.read(path.with_name(path.stem + OPTIONS_SUFFIX))
+        description = options.description
         note = path.with_suffix(".txt")
-        description = ""
-        if note.is_file():
+        if not description and note.is_file():
             try:
                 description = note.read_text(encoding="utf-8-sig").strip().splitlines()[0][:200]
             except (OSError, IndexError):
@@ -177,9 +235,9 @@ def load_workflows(folder: Path) -> tuple[list[Workflow], list[InvalidWorkflow]]
                 graph=data,
                 description=description,
                 image_nodes=image_nodes,
-                prompt_node=prompt_node,
-                prompt_default=prompt_default,
                 output_nodes=output_nodes,
+                analysis=P.analyse(data, info, skip_nodes=image_nodes + output_nodes),
+                options=options,
             )
         )
     return workflows, invalid
@@ -188,37 +246,30 @@ def load_workflows(folder: Path) -> tuple[list[Workflow], list[InvalidWorkflow]]
 def build_prompt(
     workflow: Workflow,
     image_name: str | None,
-    prompt_text: str | None,
-    randomize_seeds: bool,
+    values: dict | None = None,
+    loras: list | None = None,
+    randomize_seeds: bool = True,
     random_seed=None,
-) -> dict:
-    """The graph to queue for one job: a copy with the photo, the text and fresh seeds put in.
+) -> tuple[dict, dict]:
+    """The graph to queue for one job: a copy with the photo, the phone's settings and its
+    LoRAs put in. ``values`` must already have been checked (``params.clean_values``).
 
-    Only those three kinds of input are ever touched. The phone cannot send a workflow, or a
-    value for any other input.
+    Returns (graph, used); ``used["seed"]`` is the seed it ran with. The phone cannot send a
+    workflow, or a value for anything the job does not offer as a setting.
     """
-    graph = copy.deepcopy(workflow.graph)
-
+    graph, used = P.apply(
+        workflow.graph,
+        workflow.params,
+        values or {},
+        loras or [],
+        workflow.analysis.lora_targets,
+        randomize_unset_seed=randomize_seeds,
+        pick_seed=random_seed,
+    )
     if image_name is not None:
         for node_id in workflow.image_nodes:
             graph[node_id]["inputs"]["image"] = image_name
-
-    if workflow.prompt_node is not None and prompt_text is not None and prompt_text.strip():
-        graph[workflow.prompt_node]["inputs"]["text"] = prompt_text
-
-    if randomize_seeds:
-        # An exported workflow carries the one seed it was exported with. In the editor the seed
-        # changes after every run; here it has to be done for it, or every job from the phone
-        # would be the same roll of the dice.
-        import random
-
-        pick = random_seed or (lambda: random.randrange(MAX_SEED))
-        for node in graph.values():
-            for name in SEED_INPUTS:
-                value = node["inputs"].get(name)
-                if isinstance(value, int) and not isinstance(value, bool):
-                    node["inputs"][name] = pick()
-    return graph
+    return graph, used
 
 
 _MEDIA_TYPES = {

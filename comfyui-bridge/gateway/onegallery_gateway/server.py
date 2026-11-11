@@ -1,8 +1,8 @@
 """The gateway itself: the small API the phone uses, and the jobs it runs on ComfyUI.
 
-The phone never reaches ComfyUI. It can list the jobs in the folder, start one with a photo
-and/or a line of text, ask how a job is doing, and fetch that job's results. Everything else
-ComfyUI can do stays on this computer.
+The phone never reaches ComfyUI. It can list the jobs in the folder, start one with a photo,
+its settings (the ones each job offers - see ``params``) and LoRAs, ask how a job is doing, and
+fetch that job's results. Everything else ComfyUI can do stays on this computer.
 """
 
 from __future__ import annotations
@@ -10,7 +10,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import json
 import logging
+import os
+import socket
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -19,14 +22,18 @@ from pathlib import Path
 import aiohttp
 from aiohttp import web
 
+from . import params as P
 from . import workflows as wf
 from .security import Config, Devices, read_json, write_json
 
 log = logging.getLogger("onegallery.gateway")
 
 ACTIVE = ("queued", "running")
-MAX_PROMPT_CHARS = 4000
+MAX_SETTINGS_BYTES = 256 * 1024
 DEVICE_KEY = web.AppKey("device", object)
+DISCOVERY_QUESTION = b"ONEGALLERY_DISCOVER 1"
+#: How long ComfyUI's node definitions and the model lists are trusted before being read again
+CATALOGUE_SECONDS = 60
 
 
 class ApiError(Exception):
@@ -57,6 +64,8 @@ class Job:
     idempotency_key: str | None = None
     payload_hash: str | None = None
     input_name: str | None = None
+    #: The seed it ran with, so a result worth keeping can be made again
+    seed: int | None = None
 
     def public(self) -> dict:
         shown = {
@@ -78,6 +87,8 @@ class Job:
             ]
         if self.error:
             shown["error"] = self.error
+        if self.seed is not None:
+            shown["seed"] = self.seed
         return shown
 
 
@@ -153,6 +164,11 @@ class Comfy:
                 raise ApiError(422, "workflow_invalid", _refusal(body))
             return body["prompt_id"]
 
+    async def object_info(self) -> dict:
+        async with self.session.get(f"{self.base}/object_info", timeout=aiohttp.ClientTimeout(total=30)) as r:
+            r.raise_for_status()
+            return await r.json(content_type=None)
+
     async def history(self, prompt_id: str) -> dict | None:
         async with self.session.get(f"{self.base}/history/{prompt_id}") as response:
             response.raise_for_status()
@@ -196,6 +212,56 @@ def _failure(entry: dict) -> str:
     return "Generation failed"
 
 
+#: ComfyUI's loader nodes whose choices are the files of a models sub-folder
+CATALOGUE_SOURCES = {
+    "loras": ("LoraLoaderModelOnly", "lora_name"),
+    "checkpoints": ("CheckpointLoaderSimple", "ckpt_name"),
+    "diffusion_models": ("UNETLoader", "unet_name"),
+    "vae": ("VAELoader", "vae_name"),
+    "text_encoders": ("CLIPLoader", "clip_name"),
+    "controlnet": ("ControlNetLoader", "control_net_name"),
+    "upscale_models": ("UpscaleModelLoader", "model_name"),
+}
+
+
+def scan_models(models_dir: Path | None, limit: int = 20000) -> dict[str, list[str]]:
+    """Model files under ComfyUI's ``models`` folder, by sub-folder, named the way ComfyUI
+    names them (relative path, this system's separator)."""
+    found: dict[str, list[str]] = {}
+    if models_dir is None or not models_dir.is_dir():
+        return found
+    folders = {f for names in P.MODEL_FOLDERS.values() for f in names}
+    count = 0
+    for folder in sorted(folders):
+        root = models_dir / folder
+        if not root.is_dir():
+            continue
+        names: list[str] = []
+        for directory, subdirs, files in os.walk(root, followlinks=True):
+            subdirs.sort()
+            for file in sorted(files):
+                if file.lower().endswith(P.MODEL_EXTENSIONS):
+                    names.append(os.path.relpath(os.path.join(directory, file), root))
+                    count += 1
+                    if count >= limit:
+                        break
+        found[folder] = names
+    return found
+
+
+def catalogue(scanned: dict[str, list[str]], info: P.NodeInfo) -> P.ModelLists:
+    """What ComfyUI itself lists (it knows extra model paths) plus what is on disk."""
+    by_folder = {folder: list(names) for folder, names in scanned.items()}
+    for folder, (class_type, name) in CATALOGUE_SOURCES.items():
+        listed = by_folder.setdefault(folder, [])
+        for choice in info.choices(class_type, name) or []:
+            if isinstance(choice, str) and choice not in listed:
+                listed.append(choice)
+    by_folder.setdefault("unet", by_folder.get("diffusion_models", []))
+    by_folder.setdefault("clip", by_folder.get("text_encoders", []))
+    return P.ModelLists(by_folder)
+
+
 def prepare_image(data: bytes, max_side: int) -> bytes:
     """Checks that ``data`` really is a picture the gateway accepts and re-saves it as PNG.
 
@@ -233,6 +299,11 @@ class Gateway:
         self.jobs = JobStore(data_dir / "jobs.json")
         self.comfy: Comfy | None = None
         self._tasks: set[asyncio.Task] = set()
+        self._info = P.NodeInfo(read_json(data_dir / "object_info.json", {}))
+        self._info_read = 0.0
+        self._models = P.ModelLists()
+        self._models_read = 0.0
+        self._discovery = None
 
     # --- lifecycle -------------------------------------------------------------------------------
 
@@ -255,6 +326,8 @@ class Gateway:
         session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120))
         self.comfy = Comfy(self.config.comfy_url, session)
         self.jobs.forget_older_than(self.config.job_retention_hours * 3600)
+        if self.config.discovery:
+            await self._start_discovery()
         # Jobs that were in flight when the gateway last stopped
         for job in list(self.jobs.jobs.values()):
             if job.status in ACTIVE:
@@ -266,8 +339,63 @@ class Gateway:
     async def _stop(self, app: web.Application) -> None:
         for task in self._tasks:
             task.cancel()
+        if self._discovery is not None:
+            self._discovery.close()
         if self.comfy:
             await self.comfy.session.close()
+
+    async def _start_discovery(self) -> None:
+        """Answers a phone that asks, by UDP broadcast, whether a gateway is on this network."""
+        gateway = self
+
+        class Answer(asyncio.DatagramProtocol):
+            def connection_made(self, transport):
+                self.transport = transport
+
+            def datagram_received(self, data, address):
+                if data.strip() != DISCOVERY_QUESTION:
+                    return
+                reply = {
+                    "service": "onegallery-gateway",
+                    "name": socket.gethostname(),
+                    "port": gateway.config.port,
+                    "pairing": Devices.open(gateway.data_dir).pairing_open(),
+                }
+                self.transport.sendto(json.dumps(reply).encode(), address)
+
+        try:
+            transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
+                Answer, local_addr=("0.0.0.0", self.config.port), allow_broadcast=True
+            )
+            self._discovery = transport
+        except OSError as error:
+            log.warning("Phones cannot find this gateway by themselves (UDP %s: %s)", self.config.port, error)
+
+    async def node_info(self) -> P.NodeInfo:
+        """ComfyUI's node definitions: fresh when ComfyUI answers, the last copy when it does not."""
+        if time.time() - self._info_read < CATALOGUE_SECONDS:
+            return self._info
+        self._info_read = time.time()
+        try:
+            data = await self.comfy.object_info()
+            if isinstance(data, dict) and data:
+                self._info = P.NodeInfo(data)
+                await asyncio.get_running_loop().run_in_executor(None, write_json, self.data_dir / "object_info.json", data)
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+            pass
+        return self._info
+
+    async def models(self) -> P.ModelLists:
+        info = await self.node_info()
+        if time.time() - self._models_read >= CATALOGUE_SECONDS:
+            scanned = await asyncio.get_running_loop().run_in_executor(None, scan_models, self.config.models_dir())
+            self._models = catalogue(scanned, info)
+            self._models_read = time.time()
+        return self._models
+
+    async def load_workflows(self):
+        info = await self.node_info()
+        return await asyncio.get_running_loop().run_in_executor(None, wf.load_workflows, self.workflows_dir, info)
 
     def _spawn(self, coroutine) -> None:
         task = asyncio.ensure_future(coroutine)
@@ -315,19 +443,27 @@ class Gateway:
             raise ApiError(400, "bad_request", "Send the pairing code as JSON")
         result = Devices.open(self.data_dir).finish_pairing(secret, name)
         if result is None:
-            # One answer for wrong, expired and used-up, so nothing can be learned by guessing
-            raise ApiError(401, "pairing_failed", "That pairing code is not valid. Make a new one on the computer.")
+            # One answer for wrong, expired and used-up, so nothing can be learned by guessing;
+            # and not a quick one, so guessing is slow as well as limited
+            log.warning("A phone at %s tried a wrong or expired pairing code", request.remote)
+            await asyncio.sleep(1.5)
+            raise ApiError(
+                401, "pairing_failed",
+                "That code is not valid. Check the code in the ComfyUI window, or restart ComfyUI for a new one.",
+            )
         device, token = result
         log.info("Paired device %s (%s)", device.id, device.name)
         return web.json_response({"device_id": device.id, "token": token, "fingerprint": self.fingerprint})
 
     async def list_workflows(self, request: web.Request) -> web.Response:
-        found, invalid = wf.load_workflows(self.workflows_dir)
+        found, invalid = await self.load_workflows()
+        models = await self.models()
+        loras = models.files(("loras",))
         return web.json_response(
             {
                 "max_upload_bytes": self.config.max_upload_bytes,
                 "comfyui_reachable": await self.comfy.reachable(),
-                "workflows": [w.describe() for w in found],
+                "workflows": [w.describe(models, loras, self.config.randomize_seeds) for w in found],
                 # Files in the folder that cannot be run, and why - so a job that is missing
                 # from the list on the phone is not a mystery
                 "invalid": [asdict(i) for i in invalid],
@@ -370,11 +506,20 @@ class Gateway:
             raise ApiError(400, "bad_request", "Send the job as multipart/form-data")
 
         workflow_id, prompt_text, image = "", None, None
+        settings_text, loras_text = "", ""
         async for part in await request.multipart():
             if part.name == "workflow_id":
                 workflow_id = (await part.text()).strip()
             elif part.name == "prompt":
-                prompt_text = (await part.text())[:MAX_PROMPT_CHARS]
+                prompt_text = (await part.text())[: P.MAX_TEXT_CHARS]
+            elif part.name in ("params", "loras"):
+                text = (await part.read(decode=False))[: MAX_SETTINGS_BYTES + 1]
+                if len(text) > MAX_SETTINGS_BYTES:
+                    raise ApiError(413, "too_large", "The settings are too long")
+                if part.name == "params":
+                    settings_text = text.decode("utf-8", "replace")
+                else:
+                    loras_text = text.decode("utf-8", "replace")
             elif part.name == "image":
                 chunks, size = [], 0
                 while chunk := await part.read_chunk(256 * 1024):
@@ -384,18 +529,34 @@ class Gateway:
                     chunks.append(chunk)
                 image = b"".join(chunks)
 
-        found, _ = wf.load_workflows(self.workflows_dir)
+        found, _ = await self.load_workflows()
         workflow = next((w for w in found if w.id == workflow_id), None)
         if workflow is None:
             raise ApiError(404, "unknown_workflow", "That job is not in the folder any more")
         if workflow.requires_image and not image:
             raise ApiError(400, "image_required", "This job needs a photo")
 
+        models = await self.models()
+        try:
+            sent = json.loads(settings_text) if settings_text.strip() else {}
+            if prompt_text is not None and prompt_text.strip() and isinstance(sent, dict) and workflow.prompt:
+                sent.setdefault("prompt", prompt_text)  # a phone from before "params"
+            values = P.clean_values(workflow.params, sent, models)
+            loras = P.clean_loras(
+                json.loads(loras_text) if loras_text.strip() else [],
+                workflow.available_loras(models.files(("loras",))),
+                workflow.analysis.lora_targets,
+            )
+        except ValueError as error:  # P.InvalidValue, and JSON that is not JSON
+            message = str(error) if isinstance(error, P.InvalidValue) else "The settings are not valid JSON"
+            raise ApiError(400, "invalid_settings", message)
+
         # Same key, same job: a phone that never heard the answer can simply ask again
         key = request.headers.get("Idempotency-Key") or None
         digest = hashlib.sha256()
         digest.update(workflow_id.encode())
-        digest.update(b"\0" + (prompt_text or "").encode())
+        digest.update(b"\0" + json.dumps(values, sort_keys=True).encode())
+        digest.update(b"\0" + json.dumps([vars(l) for l in loras], sort_keys=True).encode())
         digest.update(b"\0" + (image or b""))
         payload_hash = digest.hexdigest()
         if key:
@@ -425,7 +586,7 @@ class Gateway:
             payload_hash=payload_hash,
         )
         self.jobs.put(job)
-        self._spawn(self._run(job, workflow, prepared, prompt_text))
+        self._spawn(self._run(job, workflow, prepared, values, loras))
         return web.json_response({"job_id": job.job_id, "status": job.status}, status=202)
 
     def _job_for(self, request: web.Request) -> Job:
@@ -442,14 +603,15 @@ class Gateway:
         self.jobs.put(job)
         log.info("Job %s failed: %s", job.job_id, message)
 
-    async def _run(self, job: Job, workflow: wf.Workflow, image: bytes | None, prompt_text: str | None) -> None:
+    async def _run(self, job: Job, workflow: wf.Workflow, image: bytes | None, values: dict, loras: list) -> None:
         try:
             image_name = None
             if image is not None:
                 # One file per job, named for the job: two phones sending at once cannot collide
                 image_name = await self.comfy.upload_image(image, f"onegallery_{job.job_id}.png")
                 job.input_name = image_name
-            graph = wf.build_prompt(workflow, image_name, prompt_text, self.config.randomize_seeds)
+            graph, used = wf.build_prompt(workflow, image_name, values, loras, self.config.randomize_seeds)
+            job.seed = used.get("seed")
             job.prompt_id = await self.comfy.queue(graph)
             self.jobs.put(job)
             log.info("Job %s queued as %s (%s)", job.job_id, job.prompt_id, workflow.name)
@@ -467,7 +629,7 @@ class Gateway:
 
     async def _watch(self, job: Job) -> None:
         """Follows a queued job until ComfyUI has finished it, however long that takes."""
-        found, _ = wf.load_workflows(self.workflows_dir)
+        found, _ = await self.load_workflows()
         workflow = next((w for w in found if w.id == job.workflow_id), None)
         output_nodes = workflow.output_nodes if workflow else []
         missing_since = None
@@ -506,10 +668,10 @@ class Gateway:
             return
 
     def _remove_input(self, job: Job) -> None:
-        folder = self.config.comfy_input_dir
-        if not folder or not job.input_name:
+        folder = self.config.input_dir()
+        if folder is None or not job.input_name or not job.input_name.startswith("onegallery_"):
             return
         try:
-            (Path(folder) / job.input_name).unlink(missing_ok=True)
+            (folder / job.input_name).unlink(missing_ok=True)
         except OSError:
             pass
