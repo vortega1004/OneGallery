@@ -1,0 +1,119 @@
+{
+  "last_node_id": 3,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "OneGalleryPrompt",
+      "pos": [
+        60,
+        140
+      ],
+      "size": [
+        360,
+        180
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "text",
+          "type": "STRING",
+          "links": [],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "OneGalleryPrompt"
+      },
+      "widgets_values": [
+        "what you want to see"
+      ]
+    },
+    {
+      "id": 2,
+      "type": "OneGallerySendBack",
+      "pos": [
+        1000,
+        140
+      ],
+      "size": [
+        330,
+        320
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": null,
+          "shape": 7
+        },
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "link": null,
+          "shape": 7
+        },
+        {
+          "name": "filenames",
+          "type": "VHS_FILENAMES",
+          "link": null,
+          "shape": 7
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "OneGallerySendBack"
+      },
+      "widgets_values": [
+        "OneGallery/prompt"
+      ]
+    },
+    {
+      "id": 3,
+      "type": "Note",
+      "pos": [
+        60,
+        380
+      ],
+      "size": [
+        420,
+        260
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "HOW TO USE THIS TEMPLATE\n\n1. Build your workflow in the blue box, between the two OneGallery nodes.\n2. Test it here with Queue. The Phone Image node works like Load Image.\n3. Workflow > Export (API), and save the file into the gateway's workflows folder.\n   The file name is the job name on the phone.\n\nOnly what reaches Send to Phone is sent back.\n\nNo photo comes in for this one: on the phone it is started with only the text."
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    }
+  ],
+  "links": [],
+  "groups": [
+    {
+      "title": "Your workflow goes here",
+      "bounding": [
+        460,
+        60,
+        500,
+        440
+      ],
+      "color": "#3f789e",
+      "font_size": 24,
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {},
+  "version": 0.4
+}
