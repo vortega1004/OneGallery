@@ -51,7 +51,8 @@ app/src/main/java/com/onegallery/app/
 ├── data/
 │   ├── MediaStoreRepository.kt       # Paged (id-keyed) MediaStore read, live observer, snapshot/edit writes
 │   ├── MediaTrash.kt                 # Android's trash: trash / restore / delete for good / list
-│   └── AlbumLayoutRepository.kt      # Saves the album list's arrangement (DataStore)
+│   ├── AlbumLayoutRepository.kt      # Saves the album list's arrangement (DataStore)
+│   └── comfy/                        # ComfyUI gateway: models, pinned-TLS client, controller (jobs, results)
 ├── domain/
 │   ├── MediaItem.kt                  # Models: MediaItem, MediaType (Photo, Video, MotionPhoto), Album
 │   ├── Library.kt                    # The library with albums and per-album lists pre-built
@@ -82,12 +83,18 @@ app/src/main/java/com/onegallery/app/
 │   ├── grid/
 │   │   ├── GalleryGridScreen.kt       # Album list -> group -> album grid (the app starts here; no tabs)
 │   │   └── AlbumTiles.kt              # Album/group tiles, long-press drag to rearrange
+│   ├── comfy/
+│   │   └── ComfyScreens.kt            # Connection/pairing, the Share sheet (jobs + prompt), jobs list
 │   ├── trash/
 │   │   └── TrashScreen.kt             # What is in the trash; restore or delete for good
 │   └── theme/
 │       ├── Color.kt                   # One UI color palette (AMOLED dark / light)
 │       └── Theme.kt                   # Squircle cards, rounded bottom sheets
 ```
+
+`comfyui-bridge/` (repo root, not part of the app) is what runs on the ComfyUI computer: the
+gateway the app talks to, a three-node ComfyUI pack, starter jobs and editor templates. Its
+README is the reference for the API the app's `data/comfy` code speaks.
 
 ---
 

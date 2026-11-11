@@ -106,6 +106,8 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     // Unit tests (pure Kotlin only - e.g. the editor's transform math)
+    // android.jar's org.json is stubs in plain unit tests; this is the real thing, tests only
+    testImplementation("org.json:json:20240303")
     testImplementation("junit:junit:4.13.2")
 
     debugImplementation("androidx.compose.ui:ui-tooling")

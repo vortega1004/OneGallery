@@ -48,6 +48,7 @@ import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -66,6 +67,9 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel as composeViewModel
+import com.onegallery.app.data.comfy.ComfyController
+import com.onegallery.app.ui.comfy.ComfyConnectionScreen
+import com.onegallery.app.ui.comfy.ComfyJobsScreen
 import com.onegallery.app.ui.gif.GifCreatorScreen
 import com.onegallery.app.ui.gif.GifCreatorViewModel
 import kotlinx.coroutines.launch
@@ -297,6 +301,18 @@ fun GalleryApp(viewModel: GalleryViewModel, messages: SnackbarHostState) {
         next?.invoke(result.resultCode == Activity.RESULT_OK)
     }
 
+    // --- ComfyUI --------------------------------------------------------------------------
+    var showComfyJobs by rememberSaveable { mutableStateOf(false) }
+    var showComfyConnection by rememberSaveable { mutableStateOf(false) }
+    // "Sent", "finished · saved", "failed": said once, wherever in the app the user is by then
+    val comfy = remember { ComfyController.get(context) }
+    LaunchedEffect(comfy) {
+        comfy.messages.collect { text ->
+            messages.currentSnackbarData?.dismiss()
+            scope.launch { messages.showSnackbar(text, duration = SnackbarDuration.Short) }
+        }
+    }
+
     // --- Trash ----------------------------------------------------------------------------
     var showTrash by rememberSaveable { mutableStateOf(false) }
 
@@ -406,6 +422,19 @@ fun GalleryApp(viewModel: GalleryViewModel, messages: SnackbarHostState) {
         return
     }
 
+    if (showComfyConnection) {
+        ComfyConnectionScreen(onClose = { showComfyConnection = false })
+        return
+    }
+
+    if (showComfyJobs) {
+        ComfyJobsScreen(
+            onClose = { showComfyJobs = false },
+            onOpenConnection = { showComfyConnection = true }
+        )
+        return
+    }
+
     if (showTrash) {
         val trashed by viewModel.trashedItems.collectAsStateWithLifecycle()
         TrashScreen(
@@ -484,6 +513,8 @@ fun GalleryApp(viewModel: GalleryViewModel, messages: SnackbarHostState) {
                 onMove = { items -> moveIds = items.map { it.id }.toLongArray() },
                 onTrash = { items -> changeTrash(items.map { it.uri }, toTrash = true) },
                 onOpenTrash = { showTrash = true },
+                onOpenComfyJobs = { showComfyJobs = true },
+                onOpenComfyConnection = { showComfyConnection = true },
                 onMediaSortChange = {
                     // Recorded against the album on screen, so each folder keeps its own order
                     viewModel.setMediaSort(openedAlbumId, it)

@@ -1,6 +1,13 @@
 # OneGallery — Engineering Handoff
 
-**Latest:** 2026-11-10, branch `canvas-fill` (on top of `performance`) — the photo editor has a
+**Latest:** 2026-11-10, branch `comfyui-send` (on top of `canvas-fill`) — **Send to ComfyUI**. The
+viewer's Share button now lists the jobs offered by a small gateway on the ComfyUI computer;
+picking one sends the photo (and an optional prompt), and the result — image or video — is
+saved into a ComfyUI album. The gateway, a three-node ComfyUI pack, starter jobs and templates
+live in `comfyui-bridge/` in this repo. Run end to end on the emulator against ComfyUI 0.45.0
+(CPU) on the development PC; not on the Pixel, and not with a real workflow. See the §7 entry.
+
+**Before that:** 2026-11-10, branch `canvas-fill` (on top of `performance`) — the photo editor has a
 third tool, **Canvas**: put the photo, unscaled, on a larger canvas of a chosen shape and fill
 the rest with a flat colour (green by default, for keying). Emulator only; see the §7 entry.
 
@@ -136,6 +143,7 @@ crashes** on either. Anything the emulator's tiny library cannot exercise is cal
 
 | Item | Status |
 | --- | --- |
+| Send to ComfyUI (app + `comfyui-bridge/`) | **VERIFIED on emulator, end to end** (2026-11-10) against the real gateway and ComfyUI 0.45.0 in CPU mode on the dev PC, reached at `https://10.0.2.2:8443`. Paired with a typed code (certificate on the phone `587B-F0CD…` = the gateway's). Share → sheet listed the four starter jobs; *Freestyle test* showed its own prompt greyed out before the box was touched; started empty → ComfyUI ran the default; started with typed text → ComfyUI's history shows the typed text. Results saved to `Pictures/ComfyUI`: PNGs and an MP4 (*Video echo test*). Jobs list shows each "Saved". Gateway stopped → "The gateway could not be reached…" with Try again. Repeated on the `daily` (R8) build. Gateway on its own: 25 unit tests + `tests/live_check.py` all passed |
 | Editor → Canvas (fit to a shape, fill the rest) | **VERIFIED on emulator** (2026-11-10). 1080×1920 portrait → 1:1, dragged left, saved: 1920×1920, photo untouched at x 0–1079, fill reads (0,255,1) after JPEG. 1920×1080 landscape cropped 1:1 then → 9:16, photo dragged to the bottom: saved 1080×1920, green above. Colour picker → `#1C1AD1` appears in the recent list; reopening the editor starts on green with it still listed. Room slider + free drag in both directions; the eye button swaps the glass working view for the flat fill |
 | Frame stepping at the end of a single-keyframe (ComfyUI-style) clip | **FIXED, VERIFIED on emulator** (2026-11-10). Before: on a 241-frame 1080×1920 libx264 clip with one keyframe, steps near the start were instant and each run of 8 near the end took 2.9–3.1 s (the `IMediaMetadataRetriever` binder call, from logcat). After (`FrameServer`): *previous* pressed straight after dragging to the end shows frame 240/241 with the right picture ("U 239" burned in), and 12 more steps back are all in memory 0.5 s later |
 | Frame numbers on variable-rate footage | **FIXED, VERIFIED on emulator** — a VFR clip with audio 0.4 s longer than its video: *previous* on the last frame went to 241/252 before, 251/252 after. The readout says 16 fps for a 16 fps clip (was 15.80), 24 (was 23.80), 30 (was 29.88) |
@@ -1009,6 +1017,59 @@ Changing either of these back will break things silently, with no error:
   time a text field is focused and swallows `input text`. Tap the field, then type.
 
 ## 7. Changelog
+
+### 2026-11-10 — Send to ComfyUI: gateway, node pack, and the app side
+
+Branch `comfyui-send`, on `canvas-fill`. Request: `ComfyUI_Android_Gallery_Handoff.md` (in the
+owner's eDrive, `projects/one-gallery/android-app-requests/`), which proposed a contract and
+left the gateway unbuilt. The owner's decisions on top of it: this side builds the gateway;
+jobs are **files in a folder**, named by file name; Share offers **only** these jobs; one
+optional **prompt** per job with the workflow's own shown greyed out; results **saved back
+automatically**; a node pack with only the in/out nodes.
+
+**`comfyui-bridge/` (runs on the ComfyUI computer).** Its own README is the reference.
+- `gateway/` — aiohttp, TLS only. Self-signed certificate; the phone pins it at pairing. The
+  pairing code is an 8-character one-time secret plus the first 10 hex digits of the
+  certificate fingerprint, and the phone checks the second half before sending the first.
+  Per-phone tokens stored hashed. Jobs = API-format `.json` files in `workflows/`. The only
+  things ever put into a workflow: the photo, the prompt text, fresh seeds.
+- `custom_nodes/ComfyUI-OneGallery/` — Phone Image, Phone Prompt, Send to Phone. Markers the
+  gateway finds by type; a stock workflow works without them (first Load Image, all outputs).
+- `workflows/` — four model-free starter jobs. `templates/` — three editor graphs.
+
+**App.**
+- `data/comfy/ComfyModels.kt` (pure, tested), `ComfyClient.kt` (HTTPS pinned to one
+  certificate — a custom trust manager that accepts exactly the pinned fingerprint, or during
+  pairing one matching the code's prefix; never "accept all"), `ComfyController.kt` (process
+  singleton: pairing, token encrypted with an Android Keystore key, jobs persisted in
+  DataStore, a poller that outlives the screen, results downloaded straight into MediaStore).
+- `ui/comfy/ComfyScreens.kt` — connection screen, the Share sheet, the jobs list.
+- Share no longer opens Android's share sheet (owner: "comfyui only for now").
+- **`INTERNET` permission added.** The app was offline before this.
+
+**Traps met.**
+- `/prompt` runs API-format JSON only; ComfyUI's normal Save writes the editor's graph. The
+  gateway lists such a file as invalid with the reason instead of offering it.
+- An exported workflow carries one fixed seed; the gateway re-rolls `seed` / `noise_seed`.
+- Material's `OutlinedTextField` shows its placeholder only when focused if it has a label.
+  The prompt's heading is a separate `Text` so the greyed-out default is visible untouched.
+- The default `workflows_dir` was one level short; found by unpacking the zip into an empty
+  folder and running it, which is now the last step before shipping the zip.
+- A `.bat` stored with LF endings mis-parses its labels in `cmd`; `.gitattributes` pins CRLF.
+- Emulator: Gboard's floating stylus toolbar sits over the left edge of the screen and eats
+  taps there, and its tutorial sheet swallows `input text`. Tap fields first; tap buttons on
+  their right half.
+
+**Not done / not known.**
+- No real workflow has been run through it: no model, no GPU, nothing longer than a second.
+- Send to Phone's `filenames` input (Video Helper Suite) is written from VHS's known output
+  shape and has not met a real VHS install.
+- Jobs are checked while the app's process is alive and again when it next opens. There is no
+  background worker and no notification, so a result arrives when the app is next opened.
+- A gateway restart mid-job (resume code exists, unexercised); two phones; cancelling a job.
+- Videos as *input*; more than one photo per job; parameters beyond the prompt.
+- Android 17's local-network permission is not requested: not required at `targetSdk` 35, and
+  the API 37 emulator connected without it. It will be needed when the target is raised.
 
 ### 2026-11-10 — editor: Canvas (fit to a shape, fill the rest with green)
 

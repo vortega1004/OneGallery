@@ -2,6 +2,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- Network. The gallery was offline until the ComfyUI feature: the only thing it ever
+         connects to is the gateway the user pairs it with (ComfyController), over TLS pinned to
+         that gateway's certificate. Android has no "local network only" form of this
+         permission for an app targeting SDK 35. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- MediaStore permissions -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />

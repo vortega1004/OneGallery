@@ -142,6 +142,8 @@ fun GalleryGridScreen(
     onMove: (List<MediaItem>) -> Unit,
     onTrash: (List<MediaItem>) -> Unit,
     onOpenTrash: () -> Unit,
+    onOpenComfyJobs: () -> Unit,
+    onOpenComfyConnection: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     // Worked out with the library itself, off the main thread — see Library.
@@ -411,6 +413,7 @@ fun GalleryGridScreen(
                                             }
                                         }
                                     )
+                                    AppMenu(onOpenComfyJobs, onOpenComfyConnection)
                                 }
                             )
                         }
@@ -467,6 +470,27 @@ private sealed interface GroupNaming {
 
     data class New(val keys: Set<String>, override val initialName: String) : GroupNaming
     data class Rename(val groupId: String, override val initialName: String) : GroupNaming
+}
+
+/** The Albums screen's overflow: the things that are not about albums. */
+@Composable
+private fun AppMenu(onOpenComfyJobs: () -> Unit, onOpenComfyConnection: () -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { expanded = true }) {
+            Icon(Icons.Rounded.MoreVert, "More", tint = DarkTextPrimary)
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, containerColor = DarkSurface) {
+            DropdownMenuItem(
+                text = { Text("ComfyUI jobs", color = DarkTextPrimary) },
+                onClick = { expanded = false; onOpenComfyJobs() }
+            )
+            DropdownMenuItem(
+                text = { Text("ComfyUI connection", color = DarkTextPrimary) },
+                onClick = { expanded = false; onOpenComfyConnection() }
+            )
+        }
+    }
 }
 
 @Composable

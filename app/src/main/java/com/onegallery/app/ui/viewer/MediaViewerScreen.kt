@@ -1,6 +1,5 @@
 package com.onegallery.app.ui.viewer
 
-import android.content.Intent
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -72,7 +71,6 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -84,6 +82,7 @@ import com.onegallery.app.domain.MediaType
 import com.onegallery.app.domain.shortDisplayName
 import com.onegallery.app.ui.common.rememberFullSizeRequest
 import com.onegallery.app.ui.common.rememberThumbnailRequest
+import com.onegallery.app.ui.comfy.SendToComfySheet
 import com.onegallery.app.ui.common.swallowTaps
 import com.onegallery.app.ui.editor.PhotoEditorScreen
 import com.onegallery.app.ui.filmstrip.FilmStripHeight
@@ -127,7 +126,8 @@ fun MediaViewerScreen(
     var topBarSuppressed by remember { mutableStateOf(false) }
     // The top bar shows only the tail of the file name; tapping it spells the whole name out
     var showFullName by remember { mutableStateOf(false) }
-    val context = LocalContext.current
+    // The item the Send to ComfyUI sheet is open for, if it is open
+    var comfyItem by remember { mutableStateOf<MediaItem?>(null) }
     // Videos autoplay, so they start silent. Held here rather than in the player so unmuting
     // once carries across every video in this viewer session.
     var isVideoMuted by rememberSaveable { mutableStateOf(true) }
@@ -457,20 +457,13 @@ fun MediaViewerScreen(
                             tint = if (canEdit) Color.White else Color(0x61FFFFFF)
                         )
                     }
-                    IconButton(
-                        onClick = {
-                            val send = Intent(Intent.ACTION_SEND).apply {
-                                type = currentItem.mimeType
-                                putExtra(Intent.EXTRA_STREAM, currentItem.uri)
-                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                            }
-                            // An item opened from another app may not be ours to pass on
-                            runCatching { context.startActivity(Intent.createChooser(send, null)) }
-                        }
+                    // Share means "send to ComfyUI" here, and only that: the owner sends photos
+                    // to his own workflows, not to other apps. The sheet lists the gateway's jobs.
+                    IconButton(onClick = { comfyItem = currentItem }
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.Share,
-                            contentDescription = "Share",
+                            contentDescription = "Send to ComfyUI",
                             tint = Color.White
                         )
                     }
@@ -492,6 +485,10 @@ fun MediaViewerScreen(
                     onSaved = { isEditorOpen = false }
                 )
             }
+        }
+
+        comfyItem?.let { item ->
+            SendToComfySheet(item = item, onDismiss = { comfyItem = null })
         }
 
         // Swipe-up / Info Sheet
