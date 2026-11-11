@@ -9,7 +9,7 @@ import coil3.request.crossfade
 
 /**
  * Small enough that `MediaThumbnailFetcher` serves the request from MediaStore's cached
- * thumbnails (its cut-off is 512 px) instead of decoding the original file.
+ * thumbnails (its cut-off is 1024 px) instead of decoding the original file.
  */
 private const val THUMBNAIL_REQUEST_PX = 512
 

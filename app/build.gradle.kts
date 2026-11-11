@@ -19,6 +19,11 @@ android {
         vectorDrawables {
             useSupportLibrary = true
         }
+        // The FFmpeg libraries ship native code for four architectures. Phones are arm64 and
+        // the emulator is x86_64; the two 32-bit builds would only add size.
+        ndk {
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
     }
 
     buildTypes {
@@ -75,6 +80,11 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.8.0")
     implementation("androidx.media3:media3-ui:1.8.0")
     implementation("androidx.media3:media3-common:1.8.0")
+    // FFmpeg software decoders, for files the phone's own decoders refuse (10-bit H.264 and
+    // the like — ComfyUI can write them). Used only as a fallback. The version is tied to the
+    // Media3 version above. GPL-3.0: see HANDOFF.md before distributing a build.
+    implementation("io.github.anilbeesetti:nextlib-media3ext:1.8.0-0.9.0")
+    implementation("io.github.anilbeesetti:nextlib-mediainfo:1.8.0-0.9.0")
 
     // Persisted user preferences (sort orders)
     implementation("androidx.datastore:datastore-preferences:1.1.1")
