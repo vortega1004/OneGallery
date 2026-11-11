@@ -32,6 +32,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
@@ -116,17 +117,24 @@ class ComfyController private constructor(private val context: Context) {
 
     // --- Pairing ---------------------------------------------------------------------------------
 
-    /** Pairs with the gateway at [address] using the code read off the computer. Null on success. */
+    /** Gateways on this network that answer the phone's broadcast. Empty when none do. */
+    suspend fun discover(): List<FoundGateway> = withContext(Dispatchers.IO) {
+        runCatching { ComfyClient.discover() }.getOrElse {
+            Log.w(TAG, "Looking for gateways failed", it)
+            emptyList()
+        }
+    }
+
+    /** Pairs with the gateway at [address] using the code shown on the computer. Null on success. */
     suspend fun pair(address: String, code: String): String? = withContext(Dispatchers.IO) {
         val url = normaliseGatewayAddress(address)
             ?: return@withContext "That is not an address the gateway can be at. It looks like https://192.168.1.50:8443"
-        val parsed = PairingCode.parse(code)
-            ?: return@withContext "The pairing code is 18 letters and digits, shown as XXXX-XXXX-XXXXX-XXXXX"
+        val digits = PairingCode.parse(code)
+            ?: return@withContext "The pairing code is the four digits shown in the ComfyUI window"
         try {
             val name = listOfNotNull(Build.MANUFACTURER, Build.MODEL).joinToString(" ").take(60)
             val (deviceId, newToken, fingerprint) =
-                ComfyClient(url, pin = null, token = null, pairingPrefix = parsed.fingerprintPrefix)
-                    .pair(parsed.secret, name)
+                ComfyClient(url, pin = null, token = null, pairing = true).pair(digits, name)
             token = newToken
             store.edit {
                 it[ADDRESS] = url
@@ -141,7 +149,7 @@ class ComfyController private constructor(private val context: Context) {
         }
     }
 
-    /** Forgets the gateway and the jobs list. Results already saved to the gallery stay. */
+    /** Forgets the gateway, the jobs list and saved settings. Results already saved stay. */
     suspend fun forget() {
         watcher?.cancel()
         token = null
@@ -162,8 +170,14 @@ class ComfyController private constructor(private val context: Context) {
 
     // --- Jobs ------------------------------------------------------------------------------------
 
-    /** Starts [workflow] on [item] (null for a job that takes no photo). Returns at once. */
-    fun send(item: MediaItem?, workflow: ComfyWorkflow, prompt: String?, maxUploadBytes: Long) {
+    /**
+     * Starts [workflow] on [item] (null for a job that takes no photo) with [settings]. Returns
+     * at once: null when the job is on its way, or the problems with the settings when they
+     * cannot be sent. The settings are remembered for this workflow either way.
+     */
+    fun send(item: MediaItem?, workflow: ComfyWorkflow, settings: ComfySettings, maxUploadBytes: Long): String? {
+        scope.launch { store.edit { it[settingsKey(workflow.id)] = encodeSettings(settings) } }
+        val (params, loras) = settings.toRequest(workflow.params).getOrElse { return it.message }
         val job = ComfyJob(
             localId = UUID.randomUUID().toString(),
             workflowId = workflow.id,
@@ -171,11 +185,18 @@ class ComfyController private constructor(private val context: Context) {
             status = ComfyJobStatus.SENDING,
             createdMs = System.currentTimeMillis(),
             sourceUri = item?.uri?.toString(),
-            prompt = prompt?.takeIf { it.isNotBlank() },
-            maxUploadBytes = maxUploadBytes
+            prompt = params.optString("prompt").takeIf { it.isNotBlank() },
+            maxUploadBytes = maxUploadBytes,
+            paramsJson = params.toString(),
+            lorasJson = loras.toString()
         )
         scope.launch { upload(job) }
+        return null
     }
+
+    /** What was last set on the sheet for [workflowId]; empty settings when nothing was. */
+    suspend fun savedSettings(workflowId: String): ComfySettings =
+        decodeSettings(store.data.first()[settingsKey(workflowId)])
 
     /** Sends a job again under the id it already has, so it cannot run twice. */
     fun retry(job: ComfyJob) {
@@ -195,11 +216,13 @@ class ComfyController private constructor(private val context: Context) {
         }
         try {
             val source = job.sourceUri?.let { Uri.parse(it) }
+            // A job saved before settings existed carries only its prompt
+            val params = job.paramsJson ?: job.prompt?.let { JSONObject().put("prompt", it).toString() }
             val jobId = if (source == null) {
-                client.submit(job.workflowId, job.prompt, null, "", job.localId)
+                client.submit(job.workflowId, params, job.lorasJson, null, "", job.localId)
             } else {
                 val (bytes, name) = photoToSend(source, job.maxUploadBytes)
-                client.submit(job.workflowId, job.prompt, ByteArrayInputStream(bytes), name, job.localId)
+                client.submit(job.workflowId, params, job.lorasJson, ByteArrayInputStream(bytes), name, job.localId)
             }
             put(job.copy(jobId = jobId, status = ComfyJobStatus.QUEUED))
             _messages.tryEmit("Sent to ComfyUI: ${job.workflowName}")
@@ -261,13 +284,16 @@ class ComfyController private constructor(private val context: Context) {
                     try {
                         val remote = client.job(job.jobId!!)
                         unreachable = 0
+                        val known = job.copy(seed = remote.seed ?: job.seed)
                         when (remote.status) {
-                            ComfyJobStatus.COMPLETED -> finish(client, job, remote)
+                            ComfyJobStatus.COMPLETED -> finish(client, known, remote)
                             ComfyJobStatus.FAILED -> {
-                                put(job.copy(status = ComfyJobStatus.FAILED, error = remote.error ?: "The job failed"))
+                                put(known.copy(status = ComfyJobStatus.FAILED, error = remote.error ?: "The job failed"))
                                 _messages.tryEmit("${job.workflowName} failed")
                             }
-                            else -> if (remote.status != job.status) put(job.copy(status = remote.status))
+                            else -> if (remote.status != job.status || known.seed != job.seed) {
+                                put(known.copy(status = remote.status))
+                            }
                         }
                     } catch (gone: ComfyApiException) {
                         if (gone.status == 404) {
@@ -349,7 +375,7 @@ class ComfyController private constructor(private val context: Context) {
             "The gateway no longer accepts this phone. Pair it again in ComfyUI connection."
         t is ComfyApiException -> t.message ?: "The gateway refused the request"
         t is CertificateException || t.cause is CertificateException || t is SSLException ->
-            if (pairing) "The gateway's certificate does not match the pairing code. Check the address and the code."
+            if (pairing) "The connection to the gateway could not be secured. Check the address."
             else "The computer at that address is not the gateway this phone was paired with."
         t is java.net.SocketTimeoutException -> "The gateway did not answer in time"
         t is IOException -> "The gateway could not be reached. Is it running, and is the phone on the same network?"
@@ -404,6 +430,7 @@ class ComfyController private constructor(private val context: Context) {
         private val DEVICE_ID = stringPreferencesKey("device_id")
         private val TOKEN = stringPreferencesKey("token")
         private val JOBS = stringPreferencesKey("jobs")
+        private fun settingsKey(workflowId: String) = stringPreferencesKey("settings_$workflowId")
 
         @Volatile
         private var instance: ComfyController? = null

@@ -9,9 +9,10 @@ and looks for them by type:
                              workflow is the default, shown greyed out on the phone.
 * ``OneGallerySendBack``   - only what reaches this node is sent back to the phone.
 
-A workflow with none of them still runs through the gateway (it falls back to the first Load
-Image node and returns every saved output), so these are a convenience, not a requirement - but
-with them there is nothing to guess.
+A workflow with none of them still runs through the gateway (it finds the prompt by itself, falls
+back to the first Load Image node and returns every saved output), so these are a convenience,
+not a requirement - but with them there is nothing to guess. A Phone Prompt node is always the
+prompt the phone edits first.
 
 Everything between them is yours.
 """

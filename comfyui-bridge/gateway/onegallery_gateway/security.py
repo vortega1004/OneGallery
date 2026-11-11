@@ -2,18 +2,14 @@
 
 **Trust model.** The gateway makes its own certificate the first time it runs. A phone learns to
 trust that one certificate when it is paired, and from then on accepts nothing else: no
-certificate authority is involved and there is no "accept anything" mode on either side.
+certificate authority is involved, and after pairing there is no "accept anything" mode.
 
-Pairing is a short code read off this computer and typed into the phone. The code has two
-halves:
-
-* a one-time secret (eight characters, good for ten minutes and one use), and
-* the first ten hex digits of the certificate's fingerprint.
-
-The phone checks the second half against the certificate it is shown *before* it sends the
-first, so a machine in the middle would need a certificate whose fingerprint starts with the
-same forty bits. On success the phone gets its own long random token and remembers the whole
-fingerprint.
+Pairing is a **four-digit code** printed when the gateway starts (and by the ``pair`` command).
+It is good for one phone and ``pairing_minutes`` minutes, and five wrong tries close pairing
+altogether until the gateway is started again or ``pair`` is run - so a guesser on the network
+gets five chances in ten thousand, once. The phone pins the certificate it was shown while
+pairing ("trust on first use"); the fingerprint is printed here and shown on the phone for
+anyone who wants to compare. On success the phone gets its own long random token.
 """
 
 from __future__ import annotations
@@ -30,10 +26,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-PAIRING_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O, 1/I: it gets typed on a phone
-PAIRING_SECRET_LENGTH = 8
-PAIRING_FINGERPRINT_DIGITS = 10
-PAIRING_LIFETIME_S = 600
+PAIRING_DIGITS = 4
 PAIRING_MAX_ATTEMPTS = 5
 
 
@@ -54,8 +47,17 @@ class Config:
     #: Finished jobs are forgotten after this long.
     job_retention_hours: int = 72
     #: ComfyUI's input folder, if the gateway should delete the photos it uploaded once their
-    #: jobs are done. Leave null to leave them there.
+    #: jobs are done. Leave null to leave them there (or to use ``comfyui_dir``/input).
     comfy_input_dir: str | None = None
+    #: The ComfyUI folder (the one holding ``models``, ``input``, ``output``). Model and LoRA
+    #: lists are read from its ``models`` folder. The start-up script passes it.
+    comfyui_dir: str | None = None
+    #: Open pairing with a fresh code every time the gateway starts.
+    pair_on_start: bool = True
+    #: How long a pairing code works.
+    pairing_minutes: int = 30
+    #: Answer phones looking for the gateway on the local network (UDP, same port number).
+    discovery: bool = True
 
     @staticmethod
     def load(data_dir: Path) -> "Config":
@@ -74,6 +76,16 @@ class Config:
     def workflows_path(self, data_dir: Path) -> Path:
         path = Path(self.workflows_dir)
         return path if path.is_absolute() else (data_dir / path).resolve()
+
+    def input_dir(self) -> Path | None:
+        if self.comfy_input_dir:
+            return Path(self.comfy_input_dir)
+        if self.comfyui_dir:
+            return Path(self.comfyui_dir) / "input"
+        return None
+
+    def models_dir(self) -> Path | None:
+        return Path(self.comfyui_dir) / "models" if self.comfyui_dir else None
 
 
 def write_json(path: Path, value) -> None:
@@ -176,8 +188,8 @@ def _hash(text: str) -> str:
 
 
 def normalise_code(code: str) -> str:
-    """A typed code with its dashes, spaces and case taken out."""
-    return "".join(ch for ch in code.upper() if ch.isalnum())
+    """A typed code with anything but its digits taken out."""
+    return "".join(ch for ch in code if ch.isdigit())
 
 
 @dataclass
@@ -212,16 +224,19 @@ class Devices:
     def save(self) -> None:
         write_json(self.path, {"devices": [asdict(d) for d in self.devices], "pairing": self.pairing})
 
-    def start_pairing(self, now: float | None = None) -> str:
-        """Makes a new one-time secret (replacing any earlier one) and returns it."""
-        secret = "".join(secrets.choice(PAIRING_ALPHABET) for _ in range(PAIRING_SECRET_LENGTH))
+    def start_pairing(self, minutes: float = 30, now: float | None = None) -> str:
+        """Makes a new four-digit code (replacing any earlier one) and returns it."""
+        code = f"{secrets.randbelow(10**PAIRING_DIGITS):0{PAIRING_DIGITS}d}"
         self.pairing = {
-            "secret_hash": _hash(secret),
-            "expires": (now or time.time()) + PAIRING_LIFETIME_S,
+            "secret_hash": _hash(code),
+            "expires": (now or time.time()) + minutes * 60,
             "attempts": 0,
         }
         self.save()
-        return secret
+        return code
+
+    def pairing_open(self, now: float | None = None) -> bool:
+        return bool(self.pairing) and (now or time.time()) <= self.pairing["expires"]
 
     def finish_pairing(self, secret: str, device_name: str, now: float | None = None) -> tuple[Device, str] | None:
         """Checks a typed secret. On success returns the new device and its token - the only
@@ -233,7 +248,7 @@ class Devices:
         if not hmac.compare_digest(pending["secret_hash"], _hash(normalise_code(secret))):
             pending["attempts"] = pending.get("attempts", 0) + 1
             if pending["attempts"] >= PAIRING_MAX_ATTEMPTS:
-                self.pairing = None  # guessed at too often: a new code has to be made
+                self.pairing = None  # guessed at too often: closed until a new code is made
             self.save()
             return None
         token = secrets.token_urlsafe(32)

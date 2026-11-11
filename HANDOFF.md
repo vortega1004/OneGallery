@@ -1,6 +1,15 @@
 # OneGallery — Engineering Handoff
 
-**Latest:** 2026-11-10, branch `thin-top-bar` (on top of `comfyui-send`) — the viewer's top bar
+**Latest:** 2026-11-11, branch `comfyui-params-pairing` (on `main`) — **ComfyUI jobs with settings.**
+The gateway now reads each workflow and offers the phone its prompt and negative prompt (found
+through links, primitives, switches and prompt enhancers — MiniMax H3 and Qwen Image 2.1 work),
+seed (random or fixed; the seed used comes back), sampler settings, template knobs, model files
+and LoRAs, plus **adding LoRAs** (per-job folder limits). Pairing is a **four-digit code** the
+gateway prints when it starts, and the phone can **find the gateway** on the network. The gateway
+**starts with ComfyUI** from the owner's launcher (`gateway/start-with-comfyui.bat`). Starter test
+jobs moved out of the jobs folder. Emulator + live gateway only; see the §7 entry.
+
+**Before that:** 2026-11-10, branch `thin-top-bar` (on top of `comfyui-send`) — the viewer's top bar
 is one thin row (24 dp) in a band of its own under the status bar; the picture starts below it
 and no longer moves or gets covered when the chrome shows or hides. The same branch carries
 the fixes from the external review of PRs #4–#9. Emulator only; see the §7 entry.
@@ -140,6 +149,8 @@ has already been done.
 ---
 
 ## 1. Current state
+
+| ComfyUI settings, LoRAs, 4-digit pairing (2026-11-11) | **VERIFIED on emulator against the live gateway** (ComfyUI 0.45.0 CPU, placeholder model files). Find gateway (with a temporary build aiming the question at the host; the AVD's NAT drops broadcasts) filled the address; pairing with 4 digits; Share → MiniMax H3 i2v: typed prompt, fixed seed, Steps 12, neon_style LoRA at 0.50 — read back from ComfyUI's history exactly so, LoRA after the UNet loader with both switch branches moved onto it; settings remembered on reopening; seed shown in the jobs list. Real generation and real Wi-Fi discovery NOT verified |
 
 Rows say which device they were checked on. Emulator rows are the `Pixel_9_Pro_XL` / API 37
 AVD with a 9-item library; the physical row is a Pixel 10 Pro XL with 3,132 items. **Zero
@@ -1031,6 +1042,54 @@ Changing either of these back will break things silently, with no error:
   time a text field is focused and swallows `input text`. Tap the field, then type.
 
 ## 7. Changelog
+
+### 2026-11-11 — ComfyUI: settings from any workflow, LoRAs, 4-digit pairing, start with ComfyUI
+
+Branch `comfyui-params-pairing`, on `main` (#4–#10 merged). The owner: the pairing "is crap — I
+want a 4 digit code"; the gateway should start with ComfyUI from their launcher; MiniMax H3 and
+Qwen 2.1 workflows showed no prompt; they want prompt, CFG, sampler, seed (fixed or random) and
+LoRAs from specific folders; the starter "templates" at the top of the Share list must go.
+
+**Why no prompt was found.** The old gateway only took a Phone Prompt node or a node titled
+"Phone Prompt". Official templates put the prompt inside subgraphs (exported as `105:104`
+ids), in `MiniMaxH3ImageToVideo.prompt`, `TextEncodeQwenImage21.prompt`, or a String node fed
+through a switch and a prompt enhancer.
+
+**Gateway (`comfyui-bridge/gateway/onegallery_gateway/params.py`, new).** Reads the API-format
+graph plus ComfyUI's `/object_info` (cached in `data/object_info.json`): prompts = text that
+reaches CONDITIONING or a media-making node's prompt input, grouped by identical text; negative
+only when every path ends at a `negative` input (Flux Kontext zeroes its positive into the
+negative); helper text excluded (String*/Regex* nodes, "system"/"task" titles). Then seed (one
+value for all seed inputs), named settings, Int/Float/Boolean primitives (labelled by title, or
+by the input they feed, with "(Enable Lightning LoRA on)" when behind a switch), titled switches,
+model files, existing LoRAs. LoRAs are added after each model loader (CLIP too for checkpoints),
+everything downstream re-pointed. Everything sent is validated (`clean_values`, `clean_loras`).
+Surveyed against 645 official templates exported in the editor (`graphToPrompt`); nine are test
+fixtures. 50 unit tests; `live_check.py` rewritten and passing against the live gateway.
+
+**Pairing.** Four digits, printed at start; 30 min; one phone; 5 wrong tries close it; 1.5 s per
+wrong try. Trust on first use replaces the old fingerprint-in-the-code (that is the price of four
+digits; the fingerprint is printed and shown for comparison). UDP discovery on port 8443.
+
+**Start-up.** `gateway/start-with-comfyui.bat`: `set COMFYUI_DIR`, `call` it before ComfyUI's
+line; runs the gateway in ComfyUI's window (`start /b`, `-u` so the banner is not buffered),
+makes `.venv` on first run, exits quietly if the port is taken. `SETUP-WITH-COMFYUI.md` is
+written for the owner's ComfyUI-side agent.
+
+**App.** `ComfyModels.kt` (params, `ComfySettings.toRequest`, settings per workflow, 4-digit
+`PairingCode`, discovery answer), `ComfyClient` (TOFU pairing, `params`/`loras` parts,
+`discover()`), `ComfyController` (discover, settings remembered per workflow, seed from the
+gateway), `ComfySettingsUi.kt` (new: prompt boxes, seed Random/Fixed with "last run used",
+number fields with the workflow's value greyed, drop-downs, switches, Models folded, LoRAs with
+strength slider and per-model target, folder-grouped picker), share sheet folds to the chosen job.
+
+**Traps.** Number fields carry their name *above* the box: an OutlinedTextField label hides the
+placeholder until focused, and the workflow's own value must show. The emulator cannot test
+broadcast discovery (slirp drops it); a throwaway build adding `10.0.2.2` to the targets proved
+the app side. The Gboard stylus sheet/toolbar on the AVD steals the first `input text`.
+
+**Not verified:** real generation, discovery over real Wi-Fi, the Pixel, the owner's own
+exported workflows (only official templates).
 
 ### 2026-11-10 — thin top bar; fixes from the review of PRs #4–#9
 

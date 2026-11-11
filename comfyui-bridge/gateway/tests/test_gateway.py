@@ -68,31 +68,32 @@ class FolderTests(unittest.TestCase):
 class AnalyseTests(unittest.TestCase):
     def test_onegallery_nodes_are_found_by_type(self):
         graph = {**ECHO, "3": {"class_type": "OneGalleryPrompt", "inputs": {"text": "hello"}}}
-        images, prompt, default, outputs = wf.analyse(graph)
-        self.assertEqual((["1"], "3", "hello", ["2"]), (images, prompt, default, outputs))
+        workflow = wf.load_workflows(folder_with({"t.json": graph}))[0][0]
+        self.assertEqual((["1"], ["2"]), (workflow.image_nodes, workflow.output_nodes))
+        self.assertEqual(("3", "text"), workflow.prompt.targets[0])
+        self.assertEqual("hello", workflow.prompt.default)
 
     def test_without_them_the_first_load_image_takes_the_photo(self):
         graph = {**STOCK, "12": {"class_type": "LoadImage", "inputs": {"image": "mask.png"}}}
-        images, prompt, _, outputs = wf.analyse(graph)
-        self.assertEqual(["4"], images)
-        self.assertIsNone(prompt)
-        self.assertEqual([], outputs)
+        self.assertEqual(["4"], wf.find_image_nodes(graph))
 
     def test_a_load_image_titled_phone_wins_over_the_first(self):
         graph = {
             **STOCK,
             "12": {"class_type": "LoadImage", "inputs": {"image": "x.png"}, "_meta": {"title": "Phone photo"}},
         }
-        self.assertEqual(["12"], wf.analyse(graph)[0])
+        self.assertEqual(["12"], wf.find_image_nodes(graph))
 
-    def test_a_node_titled_phone_prompt_is_the_prompt(self):
+    def test_any_text_encoder_is_a_prompt_without_marking_it(self):
         graph = {
             **STOCK,
-            "6": {"class_type": "CLIPTextEncode", "inputs": {"text": "a cat", "clip": ["1", 1]},
-                  "_meta": {"title": "Phone Prompt (positive)"}},
+            "6": {"class_type": "CLIPTextEncode", "inputs": {"text": "a cat", "clip": ["1", 1]}},
+            "7": {"class_type": "CLIPTextEncode", "inputs": {"text": "blurry", "clip": ["1", 1]}},
         }
-        _, prompt, default, _ = wf.analyse(graph)
-        self.assertEqual(("6", "a cat"), (prompt, default))
+        graph["9"] = {**graph["9"], "inputs": {**graph["9"]["inputs"], "positive": ["6", 0], "negative": ["7", 0]}}
+        workflow = wf.load_workflows(folder_with({"t.json": graph}))[0][0]
+        found = {p.id: p.default for p in workflow.params if p.kind == "text"}
+        self.assertEqual({"prompt": "a cat", "negative": "blurry"}, found)
 
     def test_a_workflow_with_no_image_node_needs_no_photo(self):
         graph = {"1": {"class_type": "OneGalleryPrompt", "inputs": {"text": "x"}}}
@@ -100,10 +101,19 @@ class AnalyseTests(unittest.TestCase):
         described = found[0].describe()
         self.assertFalse(described["requires_image"])
         self.assertEqual({"editable": True, "default": "x"}, described["prompt"])
+        self.assertEqual(["prompt"], [p["id"] for p in described["params"]])
 
-    def test_a_job_without_a_prompt_node_offers_no_prompt(self):
+    def test_a_job_without_a_prompt_offers_no_prompt(self):
         found, _ = wf.load_workflows(folder_with({"t.json": ECHO}))
         self.assertNotIn("prompt", found[0].describe())
+
+    def test_an_options_file_describes_hides_and_limits_loras_and_is_not_a_job(self):
+        options = {"description": "Night look", "hide": ["steps"], "lora_folders": ["wan"]}
+        found, invalid = wf.load_workflows(folder_with({"t.json": STOCK, "t.options.json": options}))
+        self.assertEqual((1, []), (len(found), invalid))
+        self.assertEqual("Night look", found[0].description)
+        self.assertNotIn("steps", [p.id for p in found[0].params])
+        self.assertEqual(["wan"], found[0].lora_folders())
 
 
 class BuildTests(unittest.TestCase):
@@ -112,7 +122,7 @@ class BuildTests(unittest.TestCase):
 
     def test_the_photo_and_the_text_are_put_in_and_nothing_else_changes(self):
         graph = {**ECHO, "3": {"class_type": "OneGalleryPrompt", "inputs": {"text": "default"}}}
-        built = wf.build_prompt(self.workflow(graph), "onegallery_1.png", "typed", randomize_seeds=False)
+        built, _ = wf.build_prompt(self.workflow(graph), "onegallery_1.png", {"prompt": "typed"}, randomize_seeds=False)
         self.assertEqual("onegallery_1.png", built["1"]["inputs"]["image"])
         self.assertEqual("typed", built["3"]["inputs"]["text"])
         self.assertEqual(graph["2"], built["2"])
@@ -121,21 +131,27 @@ class BuildTests(unittest.TestCase):
 
     def test_blank_text_keeps_the_workflows_own_prompt(self):
         graph = {**ECHO, "3": {"class_type": "OneGalleryPrompt", "inputs": {"text": "default"}}}
-        for sent in (None, "", "   "):
-            built = wf.build_prompt(self.workflow(graph), "p.png", sent, randomize_seeds=False)
+        for sent in ({}, {"prompt": ""}, {"prompt": "   "}):
+            built, _ = wf.build_prompt(self.workflow(graph), "p.png", sent, randomize_seeds=False)
             self.assertEqual("default", built["3"]["inputs"]["text"])
 
     def test_seeds_are_rolled_and_links_are_left_alone(self):
         graph = {**STOCK, "11": {"class_type": "X", "inputs": {"noise_seed": 1, "seed": ["9", 0]}}}
-        built = wf.build_prompt(self.workflow(graph), "p.png", None, randomize_seeds=True, random_seed=lambda: 42)
+        built, used = wf.build_prompt(self.workflow(graph), "p.png", {}, randomize_seeds=True, random_seed=lambda: 42)
         self.assertEqual(42, built["9"]["inputs"]["seed"])
         self.assertEqual(42, built["11"]["inputs"]["noise_seed"])
         self.assertEqual(["9", 0], built["11"]["inputs"]["seed"])
         self.assertEqual(20, built["9"]["inputs"]["steps"])
+        self.assertEqual(42, used["seed"])
 
     def test_seeds_can_be_left_as_exported(self):
-        built = wf.build_prompt(self.workflow(STOCK), "p.png", None, randomize_seeds=False)
+        built, used = wf.build_prompt(self.workflow(STOCK), "p.png", {}, randomize_seeds=False)
         self.assertEqual(7, built["9"]["inputs"]["seed"])
+        self.assertEqual(7, used["seed"])
+
+    def test_a_fixed_seed_from_the_phone(self):
+        built, _ = wf.build_prompt(self.workflow(STOCK), "p.png", {"seed": {"mode": "fixed", "value": 123}})
+        self.assertEqual(123, built["9"]["inputs"]["seed"])
 
 
 class OutputTests(unittest.TestCase):
@@ -172,32 +188,36 @@ class PairingTests(unittest.TestCase):
     def store(self):
         return Devices.open(Path(tempfile.mkdtemp()))
 
-    def test_the_code_pairs_once(self):
+    def test_the_code_is_four_digits_and_pairs_once(self):
         devices = self.store()
-        secret = devices.start_pairing()
-        device, token = devices.finish_pairing(secret, "Pixel")
+        code = devices.start_pairing()
+        self.assertRegex(code, r"^[0-9]{4}$")
+        device, token = devices.finish_pairing(code, "Pixel")
         self.assertEqual("Pixel", device.name)
-        self.assertIsNone(devices.finish_pairing(secret, "Pixel"))
+        self.assertIsNone(devices.finish_pairing(code, "Pixel"))
         self.assertEqual(device.id, Devices.open(devices.path.parent).authenticate(token).id)
 
-    def test_dashes_spaces_and_case_do_not_matter(self):
+    def test_spaces_and_dashes_do_not_matter(self):
         devices = self.store()
-        secret = devices.start_pairing()
-        typed = f" {secret[:4].lower()}-{secret[4:]} "
-        self.assertEqual(secret, normalise_code(typed))
+        code = devices.start_pairing()
+        typed = f" {code[:2]}-{code[2:]} "
+        self.assertEqual(code, normalise_code(typed))
         self.assertIsNotNone(devices.finish_pairing(typed, ""))
 
     def test_an_expired_code_is_refused(self):
         devices = self.store()
-        secret = devices.start_pairing(now=1000.0)
-        self.assertIsNone(devices.finish_pairing(secret, "", now=1000.0 + 601))
+        code = devices.start_pairing(minutes=30, now=1000.0)
+        self.assertTrue(devices.pairing_open(now=1000.0 + 60))
+        self.assertIsNone(devices.finish_pairing(code, "", now=1000.0 + 30 * 60 + 1))
 
-    def test_five_wrong_guesses_use_the_code_up(self):
+    def test_five_wrong_guesses_close_pairing(self):
         devices = self.store()
-        secret = devices.start_pairing()
+        code = devices.start_pairing()
+        wrong = f"{(int(code) + 1) % 10000:04d}"
         for _ in range(5):
-            self.assertIsNone(devices.finish_pairing("WRONGGGG", ""))
-        self.assertIsNone(devices.finish_pairing(secret, ""))
+            self.assertIsNone(devices.finish_pairing(wrong, ""))
+        self.assertFalse(devices.pairing_open())
+        self.assertIsNone(devices.finish_pairing(code, ""))
 
     def test_a_revoked_phone_is_locked_out_and_the_token_is_not_stored(self):
         devices = self.store()

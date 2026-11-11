@@ -84,7 +84,8 @@ app/src/main/java/com/onegallery/app/
 │   │   ├── GalleryGridScreen.kt       # Album list -> group -> album grid (the app starts here; no tabs)
 │   │   └── AlbumTiles.kt              # Album/group tiles, long-press drag to rearrange
 │   ├── comfy/
-│   │   └── ComfyScreens.kt            # Connection/pairing, the Share sheet (jobs + prompt), jobs list
+│   │   ├── ComfyScreens.kt            # Connection/pairing (find + 4 digits), the Share sheet, jobs list
+│   │   └── ComfySettingsUi.kt         # The job's settings on the Share sheet: prompts, seed, sampler, models, LoRAs
 │   ├── trash/
 │   │   └── TrashScreen.kt             # What is in the trash; restore or delete for good
 │   └── theme/
@@ -93,8 +94,9 @@ app/src/main/java/com/onegallery/app/
 ```
 
 `comfyui-bridge/` (repo root, not part of the app) is what runs on the ComfyUI computer: the
-gateway the app talks to, a three-node ComfyUI pack, starter jobs and editor templates. Its
-README is the reference for the API the app's `data/comfy` code speaks.
+gateway the app talks to (it reads each workflow's settings itself — `params.py`), the script
+that starts it with ComfyUI, an optional three-node ComfyUI pack, test jobs and editor templates.
+Its README is the reference for the API the app's `data/comfy` code speaks.
 
 ---
 
