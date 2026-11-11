@@ -113,8 +113,10 @@ class ComfyClient(
     fun job(jobId: String): ComfyRemoteJob = parseRemoteJob(open("/v1/jobs/$jobId", "GET").jsonOrThrow())
 
     /**
-     * Starts a job. [image] is streamed, never held whole in memory. [idempotencyKey] is what
-     * makes a retry safe: the same key gets the same job back. Returns the gateway's job id.
+     * Starts a job. [image] is copied to the connection in chunks; the caller hands over bytes
+     * it already holds (the photo, at most the gateway's upload limit — see
+     * `ComfyController.photoToSend`). [idempotencyKey] is what makes a retry safe: the same key
+     * gets the same job back. Returns the gateway's job id.
      */
     fun submit(
         workflowId: String,

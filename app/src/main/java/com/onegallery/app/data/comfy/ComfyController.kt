@@ -171,23 +171,22 @@ class ComfyController private constructor(private val context: Context) {
             status = ComfyJobStatus.SENDING,
             createdMs = System.currentTimeMillis(),
             sourceUri = item?.uri?.toString(),
-            prompt = prompt?.takeIf { it.isNotBlank() }
+            prompt = prompt?.takeIf { it.isNotBlank() },
+            maxUploadBytes = maxUploadBytes
         )
-        scope.launch { upload(job, maxUploadBytes) }
+        scope.launch { upload(job) }
     }
 
     /** Sends a job again under the id it already has, so it cannot run twice. */
     fun retry(job: ComfyJob) {
-        scope.launch {
-            upload(job.copy(status = ComfyJobStatus.SENDING, error = null, canRetry = false), DEFAULT_MAX_UPLOAD)
-        }
+        scope.launch { upload(job.copy(status = ComfyJobStatus.SENDING, error = null, canRetry = false)) }
     }
 
     fun dismiss(job: ComfyJob) {
         scope.launch { update { jobs -> jobs.filter { it.localId != job.localId } } }
     }
 
-    private suspend fun upload(job: ComfyJob, maxUploadBytes: Long) {
+    private suspend fun upload(job: ComfyJob) {
         put(job)
         val client = client()
         if (client == null) {
@@ -199,7 +198,7 @@ class ComfyController private constructor(private val context: Context) {
             val jobId = if (source == null) {
                 client.submit(job.workflowId, job.prompt, null, "", job.localId)
             } else {
-                val (bytes, name) = photoToSend(source, maxUploadBytes)
+                val (bytes, name) = photoToSend(source, job.maxUploadBytes)
                 client.submit(job.workflowId, job.prompt, ByteArrayInputStream(bytes), name, job.localId)
             }
             put(job.copy(jobId = jobId, status = ComfyJobStatus.QUEUED))
@@ -394,7 +393,6 @@ class ComfyController private constructor(private val context: Context) {
         /** The album results are saved into, under Pictures. */
         const val ALBUM = "ComfyUI"
 
-        const val DEFAULT_MAX_UPLOAD = 20L * 1024 * 1024
         private const val POLL_MS = 3_000L
         private const val SLOW_POLL_MS = 15_000L
         private const val MAX_CONVERTED_SIDE = 4096

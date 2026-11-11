@@ -86,7 +86,12 @@ data class ComfyJob(
     /** MediaStore uris of the results once they are saved to the ComfyUI album. */
     val savedUris: List<String> = emptyList(),
     /** Whether a failed job can simply be sent again (the trouble was the network, not the job). */
-    val canRetry: Boolean = false
+    val canRetry: Boolean = false,
+    /**
+     * The gateway's upload limit when this job was started. Kept with the job so that sending
+     * it again shrinks the photo against the same limit, not against a default.
+     */
+    val maxUploadBytes: Long = DEFAULT_MAX_UPLOAD_BYTES
 ) {
     val isFinished: Boolean get() = status == ComfyJobStatus.COMPLETED || status == ComfyJobStatus.FAILED
 }
@@ -134,6 +139,9 @@ fun normaliseGatewayAddress(text: String): String? {
 
 const val DEFAULT_GATEWAY_PORT = 8443
 
+/** The gateway's own default, used only when it has never said otherwise. */
+const val DEFAULT_MAX_UPLOAD_BYTES = 20L * 1024 * 1024
+
 // --- JSON ----------------------------------------------------------------------------------------
 
 fun parseWorkflowList(json: JSONObject): ComfyWorkflowList {
@@ -153,7 +161,7 @@ fun parseWorkflowList(json: JSONObject): ComfyWorkflowList {
         it.optString("file", "") to it.optString("reason", "")
     }
     return ComfyWorkflowList(
-        maxUploadBytes = json.optLong("max_upload_bytes", 20L * 1024 * 1024),
+        maxUploadBytes = json.optLong("max_upload_bytes", DEFAULT_MAX_UPLOAD_BYTES),
         comfyReachable = json.optBoolean("comfyui_reachable", true),
         workflows = workflows,
         invalid = invalid
@@ -205,6 +213,7 @@ fun encodeJobs(jobs: List<ComfyJob>): String = JSONArray().apply {
                 .put("error", job.error ?: JSONObject.NULL)
                 .put("saved", JSONArray(job.savedUris))
                 .put("can_retry", job.canRetry)
+                .put("max_upload", job.maxUploadBytes)
         )
     }
 }.toString()
@@ -224,7 +233,8 @@ fun decodeJobs(text: String): List<ComfyJob> {
                 prompt = item.stringOrNull("prompt"),
                 error = item.stringOrNull("error"),
                 savedUris = item.optJSONArray("saved").strings(),
-                canRetry = item.optBoolean("can_retry", false)
+                canRetry = item.optBoolean("can_retry", false),
+                maxUploadBytes = item.optLong("max_upload", DEFAULT_MAX_UPLOAD_BYTES)
             )
         }.getOrNull()
     }

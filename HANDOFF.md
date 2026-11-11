@@ -1,6 +1,11 @@
 # OneGallery — Engineering Handoff
 
-**Latest:** 2026-11-10, branch `comfyui-send` (on top of `canvas-fill`) — **Send to ComfyUI**. The
+**Latest:** 2026-11-10, branch `thin-top-bar` (on top of `comfyui-send`) — the viewer's top bar
+is one thin row (24 dp) in a band of its own under the status bar; the picture starts below it
+and no longer moves or gets covered when the chrome shows or hides. The same branch carries
+the fixes from the external review of PRs #4–#9. Emulator only; see the §7 entry.
+
+**Before that:** 2026-11-10, branch `comfyui-send` (on top of `canvas-fill`) — **Send to ComfyUI**. The
 viewer's Share button now lists the jobs offered by a small gateway on the ComfyUI computer;
 picking one sends the photo (and an optional prompt), and the result — image or video — is
 saved into a ComfyUI album. The gateway, a three-node ComfyUI pack, starter jobs and templates
@@ -143,6 +148,10 @@ crashes** on either. Anything the emulator's tiny library cannot exercise is cal
 
 | Item | Status |
 | --- | --- |
+| Thin viewer top bar | **VERIFIED on emulator** (2026-11-10, on top of the whole stack). Status bar 159 px (53 dp); bar 159–231 px (24 dp); picture `[0,231][1344,2554]` with the chrome shown **and** hidden (it does not move). On a video the bar's three icons stay through frame steps and a seek-bar drag. Name chip expands; Details and ⋮ → Move to album work from 44×24 dp targets; the trash pill (y 423–495) clears the bar. Same numbers the reviewing agent measured on its own branch |
+| Next frame tapped the instant a video opens | **VERIFIED on emulator** — two taps 0.9 s after opening, while it was still auto-playing: paused on frame 9/241 (`VideoWalk`: walk starts at frame 7, +1 banked). The reviewing agent saw two such taps do nothing on a branch without this stack; not reproduced here |
+| Rapid back-and-forth frame taps | **VERIFIED on emulator** — at the end of the single-keyframe 1080×1920 clip, 30 taps in 4.9 s (back 3, forward 2, six times): 240 → 234 exactly, picture caught up 0.4 s after the last tap. Nothing queues up behind the user |
+| Two submissions at the same instant (gateway) | **VERIFIED** on the dev PC — `gateway/tests/concurrency_check.py`: two photos of different sizes sent together from two threads, six rounds, every result the size of its own photo |
 | Send to ComfyUI (app + `comfyui-bridge/`) | **VERIFIED on emulator, end to end** (2026-11-10) against the real gateway and ComfyUI 0.45.0 in CPU mode on the dev PC, reached at `https://10.0.2.2:8443`. Paired with a typed code (certificate on the phone `587B-F0CD…` = the gateway's). Share → sheet listed the four starter jobs; *Freestyle test* showed its own prompt greyed out before the box was touched; started empty → ComfyUI ran the default; started with typed text → ComfyUI's history shows the typed text. Results saved to `Pictures/ComfyUI`: PNGs and an MP4 (*Video echo test*). Jobs list shows each "Saved". Gateway stopped → "The gateway could not be reached…" with Try again. Repeated on the `daily` (R8) build. Gateway on its own: 25 unit tests + `tests/live_check.py` all passed |
 | Editor → Canvas (fit to a shape, fill the rest) | **VERIFIED on emulator** (2026-11-10). 1080×1920 portrait → 1:1, dragged left, saved: 1920×1920, photo untouched at x 0–1079, fill reads (0,255,1) after JPEG. 1920×1080 landscape cropped 1:1 then → 9:16, photo dragged to the bottom: saved 1080×1920, green above. Colour picker → `#1C1AD1` appears in the recent list; reopening the editor starts on green with it still listed. Room slider + free drag in both directions; the eye button swaps the glass working view for the flat fill |
 | Frame stepping at the end of a single-keyframe (ComfyUI-style) clip | **FIXED, VERIFIED on emulator** (2026-11-10). Before: on a 241-frame 1080×1920 libx264 clip with one keyframe, steps near the start were instant and each run of 8 near the end took 2.9–3.1 s (the `IMediaMetadataRetriever` binder call, from logcat). After (`FrameServer`): *previous* pressed straight after dragging to the end shows frame 240/241 with the right picture ("U 239" burned in), and 12 more steps back are all in memory 0.5 s later |
@@ -213,9 +222,9 @@ crashes** on either. Anything the emulator's tiny library cannot exercise is cal
 | First frame step after a pause | **FIXED, VERIFIED on emulator** against burned-in frame numbers. Before: pause showing 227, press next, get 226. After: pause showing 48, press next, get 49; six alternating next/previous taps each moved exactly one frame; 20 rapid taps moved 20 |
 | A quick tap on a step button | **FIXED, VERIFIED on emulator** — the first step was taken inside a launched coroutine, and `input tap`'s instant release cancelled it before it ran, so roughly one tap in ten did nothing. The first step now runs on the press itself; 12 alternating taps all counted |
 | Drag that starts on a control | **VERIFIED on emulator** — a 500 px swipe beginning on the shutter, and one beginning on the next-frame button, left the pager where it was (the button press still counted); the same swipe on the picture paged to the next video and back |
-| Top bar during a frame walk | **VERIFIED on emulator** — pause alone keeps it; the first step takes it down; a tap on the picture (off) and another (on) brings it back; play brings it back |
+| Top bar during a frame walk | **SUPERSEDED 2026-11-10** (the bar has its own band and no longer hides for a walk). Was: **VERIFIED on emulator** — pause alone keeps it; the first step takes it down; a tap on the picture (off) and another (on) brings it back; play brings it back |
 | File name chip | **VERIFIED on emulator** — reads `…_names` for the 150-character test name, `…lip_V3` for `clip_V3.mp4`; a tap on it shows the full name under the bar, a tap on the name hides it; five unit tests on the shortening rule |
-| Top bar after a seek-bar drag | **VERIFIED on emulator** (review fix) — step (bar down), drag the seek bar while paused: bar back; step again, press play: bar back |
+| Top bar after a seek-bar drag | **SUPERSEDED 2026-11-10** (same reason). Was: **VERIFIED on emulator** (review fix) — step (bar down), drag the seek bar while paused: bar back; step again, press play: bar back |
 | Jog bar with buttons on its ends | **VERIFIED on emulator** — 360 px drag left on the strip went 150 → 159, the same drag right 159 → 150 (±9: 360 px less touch slop at 12 dp a frame on 480 dpi); the end buttons step and repeat as the old separate buttons did |
 | Albums-only start | **VERIFIED on emulator** — cold start lands on the album list; no bottom bar outside selection; back from an album returns to the list; the mixed selection bar still reads Move (2) / GIF (1) for a still plus a video, and the move itself landed on disk |
 | GIF creator tabs | **VERIFIED on emulator** — Frames / Playback / Crop / Size each show their tools with labels; the crop frame appears with the Crop tab and goes with it; the preview does not resize between tabs |
@@ -396,8 +405,13 @@ fling, thumbnail tap) is treated as a user scrub and each new center item is pus
 pager with `scrollToPage`.
 
 **Viewer overlays:** `MediaViewerScreen.isOverlayVisible` is the single visibility state for
-the top bar, the filmstrip/action bar **and** the video controls. The overlay heights are
-measured and passed to `VideoPlayerView` as `controlsPadding` so nothing overlaps.
+the top bar, the filmstrip/action bar **and** the video controls. The picture has a band
+reserved above and below it — `reservedTop` (status bar + `ViewerTopBarHeight`, 24 dp) and
+`reservedBottom` (filmstrip + action row + navigation bar) — **whether or not the chrome is
+showing**, so showing and hiding it never moves or resizes the picture and neither bar ever
+covers it. Both are derived from constants, not measured. The top bar is one row of
+`TopBarIcon`s (44×24 dp; `IconButton` would force 48 dp and double the bar) and fades in place.
+There is no longer any notion of hiding the top bar during a frame walk.
 
 **Viewer gestures (all on one page, none may starve the others):** the pager owns horizontal
 drags; `ZoomableImageView`'s loop consumes only when it really zooms/pans; `swipeUpToReveal`
@@ -1017,6 +1031,56 @@ Changing either of these back will break things silently, with no error:
   time a text field is focused and swallows `input text`. Tap the field, then type.
 
 ## 7. Changelog
+
+### 2026-11-10 — thin top bar; fixes from the review of PRs #4–#9
+
+Branch `thin-top-bar`, on `comfyui-send`. Emulator only.
+
+**The top bar.** The owner: the bar "is covering the whole image… It needs to be way thinner,
+thinner than the notification bar, then the viewer should start from the edge of that so it
+doesn't get covered." Another agent built it on a branch off `main` (`viewer-thin-top-bar`,
+never pushed) that could not be merged with this stack; it was handed over as a patch and
+re-done by hand here. What it is: `ViewerTopBarHeight = 24.dp`; the pager is padded by
+`reservedTop` as well as `reservedBottom`; the bar is a single row (back, "date · time" on one
+line, the name chip, details, ⋮) that fades instead of sliding; `topBarSuppressed` and the
+video player's `onFrameWalkChange` are gone, because a bar that covers nothing has no reason to
+hide during a walk. Measurements in §1 match the other agent's on its own branch.
+
+**From the review** (the reviewing agent's `REVIEW-COMMENTS.md`: no blocking findings).
+- A retried ComfyUI job now uses the upload limit the gateway gave when the job was first sent
+  (`ComfyJob.maxUploadBytes`), not a default.
+- `ComfyClient.submit`'s comment said the photo was streamed from storage; it is copied from
+  bytes already in memory (capped by the gateway's limit). The comment now says so.
+- The ComfyUI pairing file is excluded from backup and device transfer
+  (`res/xml/backup_rules.xml`, `data_extraction_rules.xml`): its token is sealed with a
+  Keystore key that never leaves the phone, so a restored copy could not work anyway.
+- Two questions answered with tests rather than argument — see the two new §1 rows (rapid
+  back-and-forth taps; simultaneous submissions).
+
+**Decisions worth not re-opening.**
+- *Why a pinned self-signed certificate and no certificate authority:* a computer on a home
+  network has no name a public authority can vouch for. The pin, taken at pairing after the
+  phone has matched 40 bits of the fingerprint against the typed code, is the trust anchor;
+  nothing else is accepted, and the "host name check" is "is this the pinned certificate".
+- *The trash is the whole device's trash.* `MediaTrash.queryTrashed` lists everything Android
+  has in its trash, including items other apps put there, and with All files access "Empty
+  trash" deletes those too. This is the one place the app can destroy something it did not
+  create. Kept deliberately (it is how a gallery's trash is expected to behave) and it asks,
+  with the count, first.
+- *Results go to `Pictures/ComfyUI`, videos included.* Verified on Android 17 with All files
+  access. Whether MediaStore accepts a video under `Pictures/` on API 29–30 without that access
+  has not been checked; it matters only if the app is ever distributed.
+
+**Trap, emulator.** The AVD is started with `-no-snapshot-save`, and it boots from the
+snapshot saved on 2026-10-02. **Everything added to the emulator in a session is gone the next
+time it starts** — test media, app data, the album arrangement. `Movies/Comfy` vanished this
+way mid-day and looked, for a minute, like the app had deleted a folder. Re-push test media
+after any emulator restart (`clips/` in the session scratch folder, or regenerate with ffmpeg).
+
+**Still open from the review:** FFmpeg-decoded playback has never been seen correct (§6.18);
+the local-network permission will be needed at `targetSdk` 37 and is the first suspect if
+pairing fails on an Android 17 phone with the gateway plainly up; the timeline scan is
+unmeasured on long 4K footage; NextLib is GPL.
 
 ### 2026-11-10 — Send to ComfyUI: gateway, node pack, and the app side
 

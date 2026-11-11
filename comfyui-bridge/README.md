@@ -117,6 +117,7 @@ On Windows, Python 3.14, ComfyUI 0.45.0 in CPU mode, 2026-11-10:
 
 - `python -m unittest discover -s tests` in `gateway/`: 25 tests (folder rules, building a job, outputs, pairing).
 - `python tests/live_check.py <address> <code> <photo>`: plays the phone end to end. All checks passed: unpaired refused; pair and pin; code not reusable; four starter jobs ran and their results downloaded (three PNG, one MP4); idempotent retry returned the same job; key reuse with another photo refused; missing photo, non-picture, unknown job, wrong token all refused.
+- `python tests/concurrency_check.py <address> <code> <photo A> <photo B>` (needs Pillow): two photos of different sizes submitted at the same instant, six rounds; every result was the size of its own photo.
 - A workflow naming a node that is not installed failed with `Node 'NoSuchNode' not found…`; an editor-format file was listed as invalid with the reason.
 - The three templates open in ComfyUI's editor, and Export (API) of each produces what the gateway expects.
 

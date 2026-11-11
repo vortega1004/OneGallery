@@ -137,10 +137,6 @@ import kotlin.math.roundToLong
  * Sound is controlled by the host ([isMuted]) rather than per player, so the choice carries
  * from one video to the next while the user pages through the viewer. Videos autoplay, so the
  * host is expected to start muted.
- *
- * [onFrameWalkChange] tells the host when the user starts walking frames and when they go back
- * to playing. Someone stepping frame by frame is studying the picture, so the host takes its own
- * chrome off it for as long as that lasts.
  */
 @Composable
 fun VideoPlayerView(
@@ -152,7 +148,6 @@ fun VideoPlayerView(
     controlsPadding: PaddingValues = PaddingValues(0.dp),
     isMuted: Boolean = true,
     onMutedChange: (Boolean) -> Unit = {},
-    onFrameWalkChange: (Boolean) -> Unit = {},
     onSnapshotTaken: ((Bitmap) -> Unit)? = null
 ) {
     // The short wait matters while scrubbing the filmstrip: every page it passes is "settled"
@@ -176,7 +171,6 @@ fun VideoPlayerView(
             controlsPadding = controlsPadding,
             isMuted = isMuted,
             onMutedChange = onMutedChange,
-            onFrameWalkChange = onFrameWalkChange,
             onSnapshotTaken = onSnapshotTaken
         )
     } else {
@@ -212,7 +206,6 @@ private fun LiveVideoPlayer(
     controlsPadding: PaddingValues,
     isMuted: Boolean,
     onMutedChange: (Boolean) -> Unit,
-    onFrameWalkChange: (Boolean) -> Unit,
     onSnapshotTaken: ((Bitmap) -> Unit)?
 ) {
     val context = LocalContext.current
@@ -563,7 +556,6 @@ private fun LiveVideoPlayer(
 
     val stepFrames: (Int) -> Unit = { frames ->
         exoPlayer.pause()
-        onFrameWalkChange(true)
         val cache = frameServer
         if (cache == null && !frameServerOpened) {
             // The cache is on its way. Bank the step rather than seeking for it — the open will
@@ -682,7 +674,6 @@ private fun LiveVideoPlayer(
         if (exoPlayer.isScrubbingModeEnabled) exoPlayer.setScrubbingModeEnabled(false)
         leaveStepping(true)
         exoPlayer.play()
-        onFrameWalkChange(false)
     }
 
     val captureFrame: () -> Unit = {
@@ -979,8 +970,6 @@ private fun LiveVideoPlayer(
                                 stepJob?.cancel()
                                 stepIndex = null
                                 parkedIndex = null
-                                // The walk is over, so the host's chrome may come back
-                                onFrameWalkChange(false)
                             }
                             // Same warm-codec path the fallback frame steps use: a drag is
                             // dozens of exact seeks in a row

@@ -37,6 +37,9 @@
     <application
         android:name=".OneGalleryApplication"
         android:allowBackup="true"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        tools:targetApi="s"
         android:icon="@mipmap/ic_launcher"
         android:label="OneGallery"
         android:roundIcon="@mipmap/ic_launcher_round"

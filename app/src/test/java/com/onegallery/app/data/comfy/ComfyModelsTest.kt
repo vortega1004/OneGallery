@@ -118,6 +118,17 @@ class ComfyModelsTest {
         assertEquals(emptyList<ComfyJob>(), decodeJobs("not json"))
     }
 
+    @Test fun `a job remembers the upload limit it was started under`() {
+        val started = ComfyJob(
+            localId = "a", workflowId = "w", workflowName = "W", status = ComfyJobStatus.FAILED,
+            createdMs = 1, canRetry = true, maxUploadBytes = 5_000_000
+        )
+        assertEquals(5_000_000L, decodeJobs(encodeJobs(listOf(started))).single().maxUploadBytes)
+        // A job saved before the limit was recorded falls back to the gateway's default
+        val old = """[{"local_id":"b","workflow_id":"w","workflow_name":"W","status":"FAILED","created":1}]"""
+        assertEquals(DEFAULT_MAX_UPLOAD_BYTES, decodeJobs(old).single().maxUploadBytes)
+    }
+
     @Test fun `a job is replaced by its id, newest first`() {
         val list = listOf(job("a", ComfyJobStatus.QUEUED, 1), job("b", ComfyJobStatus.QUEUED, 2))
         val updated = list.withJob(job("a", ComfyJobStatus.RUNNING, 1))

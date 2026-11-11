@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 11 and older. The ComfyUI pairing stays on this phone: its token is sealed with a
+     Keystore key that is never backed up, so a restored copy would only be a pairing that
+     cannot work. Everything else (sort orders, album arrangement) may travel. -->
+<full-backup-content>
+    <exclude domain="file" path="datastore/comfyui.preferences_pb" />
+</full-backup-content>
